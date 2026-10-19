@@ -57,6 +57,18 @@ def test_measured_best_uses_exact_ceiling_row_count_and_costs() -> None:
     assert plan["feasible"] is True
 
 
+def test_row_scale_matches_splitter_when_float_product_is_integral() -> None:
+    plan = plan_finalization(
+        total_seconds=1_000,
+        validation_fraction=0.2,
+        train_rows=60,
+        best=result("trial-60", "ok", 100),
+    )
+
+    # data.py and sklearn use ceil(n * fraction) in float arithmetic: 60 * 0.2 is 12.
+    assert plan["row_scale"] == pytest.approx(60 / 48)
+
+
 def test_row_scale_falls_back_to_fraction_ratio() -> None:
     plan = plan_finalization(
         total_seconds=1_000,

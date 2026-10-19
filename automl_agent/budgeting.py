@@ -83,8 +83,7 @@ def plan_finalization(
     else:
         if isinstance(train_rows, bool) or not isinstance(train_rows, Integral) or train_rows <= 0:
             raise ValueError("train_rows must be a positive integer")
-        numerator, denominator = fraction.as_integer_ratio()
-        validation_rows = (int(train_rows) * numerator + denominator - 1) // denominator
+        validation_rows = math.ceil(int(train_rows) * fraction)
         fit_rows = int(train_rows) - validation_rows
         if fit_rows <= 0:
             raise ValueError("train_rows and validation_fraction leave no fit rows")
