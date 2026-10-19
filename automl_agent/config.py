@@ -1,0 +1,109 @@
+"""CLI configuration; kept independent from expensive ML imports."""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import asdict, dataclass
+import json
+import math
+import os
+from pathlib import Path
+from urllib.parse import urlsplit
+
+
+@dataclass
+class Config:
+    task_path: Path
+    provider: str
+    base_url: str
+    model: str
+    api_key: str
+    time_budget: float = 10800
+    trial_timeout: float = 900
+    llm_timeout: float = 180
+    max_trials: int = 6
+    max_steps: int = 14
+    max_tokens: int = 100000
+    response_tokens: int = 3072
+    n_jobs: int = 4
+    memory_limit_mb: int = 12000
+    context_chars: int = 48000
+    seed: int = 42
+    validation_fraction: float = 0.2
+    run_dir: Path | None = None
+    resume: bool = False
+    offline: bool = False
+    target: str | None = None
+    task_type: str | None = None
+    metric: str | None = None
+    extra_body: dict | None = None
+
+    @property
+    def reserve_seconds(self) -> float:
+        return min(600.0, max(1.0, self.time_budget * 0.15))
+
+    def public_dict(self) -> dict:
+        data = asdict(self)
+        data.pop("api_key")
+        data.pop("extra_body")
+        return {key: str(value) if isinstance(value, Path) else value for key, value in data.items()}
+
+
+def parse_config(argv=None) -> Config:
+    parser = argparse.ArgumentParser(description="Autonomous tabular ML research agent; writes submission.csv beside task.md")
+    parser.add_argument("task_path", nargs="?", default="task.md", type=Path)
+    parser.add_argument("--time-budget", type=float, default=10800, help="Total wall time in seconds, at most 10800")
+    parser.add_argument("--trial-timeout", type=float, default=900)
+    parser.add_argument("--llm-timeout", type=float, default=180)
+    parser.add_argument("--max-trials", type=int, default=6, help="Includes the baseline and failed trials")
+    parser.add_argument("--max-steps", type=int, default=14)
+    parser.add_argument("--max-tokens", type=int, default=100000, help="Total input + output token budget")
+    parser.add_argument("--response-tokens", type=int, default=3072)
+    parser.add_argument("--n-jobs", type=int, default=min(4, os.cpu_count() or 1))
+    parser.add_argument("--memory-limit-mb", type=int, default=12000)
+    parser.add_argument("--context-chars", type=int, default=48000)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--validation-fraction", type=float, default=0.2)
+    parser.add_argument("--run-dir", type=Path)
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--offline", action="store_true", help="Explicit deterministic baseline smoke, without LLM")
+    parser.add_argument("--target")
+    parser.add_argument("--task-type", choices=["regression", "classification"])
+    parser.add_argument("--metric", choices=["rmse", "mae", "r2", "macro_f1", "f1", "accuracy", "roc_auc", "log_loss"])
+    args = parser.parse_args(argv)
+    provider = os.getenv("AUTOML_PROVIDER", "openai").lower()
+    if provider not in {"openai", "ollama"}:
+        parser.error("AUTOML_PROVIDER must be openai or ollama")
+    base_url = os.getenv("OPENAI_BASE_URL") or (os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434") if provider == "ollama" else "https://api.openai.com/v1")
+    model = os.getenv("OPENAI_MODEL") or (os.getenv("OLLAMA_MODEL", "qwen3.5:9b") if provider == "ollama" else "")
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    url = urlsplit(base_url)
+    if url.scheme not in {"http", "https"} or not url.netloc or url.username or url.password or url.query or url.fragment:
+        parser.error("OPENAI_BASE_URL must be an HTTP(S) URL without embedded credentials or query")
+    if not args.offline and not model:
+        parser.error("Set OPENAI_MODEL, or use --offline for a deterministic smoke run")
+    for name in ("time_budget", "trial_timeout", "llm_timeout"):
+        value = getattr(args, name)
+        if not math.isfinite(value) or value <= 0:
+            parser.error(f"--{name.replace('_', '-')} must be positive and finite")
+    if args.time_budget > 10800:
+        parser.error("--time-budget must be at most 10800 seconds")
+    for name in ("max_trials", "max_steps", "max_tokens", "response_tokens", "memory_limit_mb", "context_chars"):
+        if getattr(args, name) <= 0:
+            parser.error(f"--{name.replace('_', '-')} must be positive")
+    if not 1 <= args.n_jobs <= 8:
+        parser.error("--n-jobs must be between 1 and 8")
+    if not 0.05 <= args.validation_fraction <= 0.5:
+        parser.error("--validation-fraction must be between 0.05 and 0.5")
+    if args.resume and args.run_dir is None:
+        parser.error("--resume requires --run-dir")
+    try:
+        extra_body = json.loads(os.getenv("AUTOML_EXTRA_BODY", "{}"))
+        if not isinstance(extra_body, dict):
+            raise ValueError
+    except (ValueError, TypeError):
+        parser.error("AUTOML_EXTRA_BODY must be a JSON object")
+    args.task_path = args.task_path.expanduser().resolve()
+    if args.run_dir is not None:
+        args.run_dir = args.run_dir.expanduser().resolve()
+    return Config(**vars(args), provider=provider, base_url=base_url, model=model, api_key=api_key, extra_body=extra_body)

@@ -22,3 +22,4 @@ catboost_info/
 /Многоклассовая классификация/test.csv
 /Многоклассовая классификация/sample_submission.csv
 submission.csv
+.automl/
