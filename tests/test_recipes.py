@@ -86,6 +86,30 @@ def test_normalize_recipe_fills_defaults_and_preserves_explicit_dynamic_values(
     assert recipes.normalize_recipe(recipe, task_type) == expected
 
 
+def test_catboost_string_none_normalizes_to_unweighted_default_and_same_fingerprint():
+    default = recipes.default_recipe("CatBoost", "classification")
+    realized = {
+        "family": "CatBoost",
+        "parameters": {"auto_class_weights": "None"},
+    }
+
+    normalized_realized = recipes.normalize_recipe(realized, "classification")
+    assert normalized_realized == default
+    assert recipes.recipe_fingerprint(realized, "classification") == recipes.recipe_fingerprint(
+        default, "classification"
+    )
+
+
+def test_sample_weight_error_guides_to_catboost_and_sklearn_class_weight_fields():
+    recipe = {"family": "CatBoost", "parameters": {"sample_weight": [1, 2]}}
+
+    with pytest.raises(ValueError) as error:
+        recipes.normalize_recipe(recipe, "classification")
+
+    assert "auto_class_weights" in str(error.value)
+    assert "class_weight" in str(error.value)
+
+
 @pytest.mark.parametrize(
     ("task_type", "family", "parameters", "hint"),
     [
@@ -182,6 +206,25 @@ def test_recipe_code_adds_optional_numeric_missing_indicators(family):
     assert f"DEFAULT_N_JOBS = 2" in source
     ast.parse(source)
     validate_candidate_code(source)
+
+
+def test_missing_indicators_fail_clearly_when_context_has_no_numeric_branch():
+    recipe = recipes.default_recipe("ExtraTrees", "classification")
+    recipe["preprocessing"]["add_missing_indicators"] = True
+    module = _run_code(recipes.recipe_code(recipe, "classification"), "recipe_indicators_no_numeric")
+    try:
+        with pytest.raises(ValueError, match="requires at least one numeric feature"):
+            module.build_model(
+                {
+                    "task_type": "classification",
+                    "feature_columns": ["kind"],
+                    "categorical_columns": ["kind"],
+                    "n_jobs": 1,
+                }
+            )
+    finally:
+        cloudpickle.unregister_pickle_by_value(module)
+        sys.modules.pop("recipe_indicators_no_numeric", None)
 
 
 @pytest.mark.parametrize("family", ["CatBoost", "ExtraTrees", "Linear"])

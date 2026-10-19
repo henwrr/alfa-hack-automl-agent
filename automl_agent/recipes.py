@@ -19,8 +19,9 @@ _REJECTED_GUIDANCE = {
         "or sklearn class_weight."
     ),
     "sample_weight": (
-        "sample_weight is per-row fit data, not a recipe parameter; use a supported "
-        "classification class_weight option instead."
+        "sample_weight is per-row fit data, not a recipe parameter; use CatBoost "
+        "auto_class_weights='Balanced' or 'SqrtBalanced', or sklearn class_weight="
+        "'balanced' (ExtraTrees also accepts 'balanced_subsample')."
     ),
     "early_stopping_rounds": (
         "early_stopping_rounds needs a validated eval_set; recipe candidates do not "
@@ -122,6 +123,8 @@ def _normalize_parameter(family, task_type, name, value):
         if name == "auto_class_weights":
             if task_type != "classification":
                 raise ValueError("auto_class_weights is available only for classification.")
+            if value == "None":
+                return None
             if value not in (None, "Balanced", "SqrtBalanced"):
                 raise ValueError("auto_class_weights must be None, 'Balanced', or 'SqrtBalanced'.")
             return value
@@ -226,6 +229,9 @@ def recipe_code(recipe, task_type, n_jobs=4):
     wrapper = "\n\ndef build_model(context):\n    model = _build_template_model(context)\n"
     wrapper += f"    model.set_params(**{params!r})\n"
     if normalized["preprocessing"]["add_missing_indicators"]:
+        wrapper += "    preprocess = model.named_steps['preprocess']\n"
+        wrapper += "    if not any(name == 'numeric' for name, _, _ in preprocess.transformers):\n"
+        wrapper += "        raise ValueError('add_missing_indicators requires at least one numeric feature column.')\n"
         wrapper += "    model.set_params(preprocess__numeric__impute__add_indicator=True)\n"
     wrapper += "    return model\n"
     return source.rstrip() + wrapper

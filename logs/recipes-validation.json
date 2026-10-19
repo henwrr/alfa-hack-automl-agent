@@ -7,10 +7,20 @@
     "result": "collection_error",
     "reason": "ImportError: automl_agent.recipes did not exist before implementation"
   },
+  "followup_red_run": {
+    "command": "python -m pytest tests/test_recipes.py -q -k 'catboost_string_none or sample_weight_error or missing_indicators_fail_clearly'",
+    "exit_code": 1,
+    "failed": 3,
+    "expected_failures": [
+      "CatBoost auto_class_weights='None' was rejected instead of normalized to None.",
+      "sample_weight guidance omitted CatBoost auto_class_weights and sklearn class_weight.",
+      "Missing numeric branch surfaced sklearn's raw ColumnTransformer parameter error."
+    ]
+  },
   "green_run": {
     "command": "python -m pytest tests/test_recipes.py tests/test_families.py -q",
     "exit_code": 0,
-    "passed": 62,
+    "passed": 65,
     "failed": 0,
     "skipped": 0,
     "warnings": [
@@ -23,7 +33,9 @@
     "classification and regression fit/predict for CatBoost, ExtraTrees, and Linear",
     "categorical and numeric missing values, infinities, and string labels",
     "CatBoost auto_class_weights=Balanced and dynamic parameter overrides",
+    "CatBoost native 'None' alias shares canonical unweighted default fingerprint",
     "sklearn class_weight=balanced and SimpleImputer missing indicators",
+    "Clear standalone error when indicators are requested without numeric features",
     "joblib serialization round trips and worker manifest model save/reload"
   ],
   "limitations": [
