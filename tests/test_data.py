@@ -102,3 +102,24 @@ def test_classification_split_is_stratified_when_rare_class_can_be_retained(tmp_
     for key in ("train_target", "validation_target"):
         values = pd.read_csv(split[key])["label"]
         assert "rare" in set(values)
+
+
+def test_explicit_primary_metric_wins_over_diagnostic_metrics_in_english_and_russian(tmp_path):
+    cases = [
+        ("Regression. Main metric: MAE; RMSE is reported for diagnostics.", "mae", "regression"),
+        ("Regression. Metric: MAE; RMSE is diagnostic.", "mae", "regression"),
+        ("Регрессия. Основная метрика MAE, RMSE приводится для справки.", "mae", "regression"),
+        ("Primary metric: log_loss. ROC-AUC is diagnostic.", "log_loss", "classification"),
+        ("Метрика оценки — log_loss; ROC-AUC справочная.", "log_loss", "classification"),
+    ]
+    for index, (description, metric, task_type) in enumerate(cases):
+        fixture_dir = tmp_path / f"fixture_{index}"
+        fixture_dir.mkdir()
+        task_path = make_task(fixture_dir)
+        # Keep each generated fixture independent while varying only its description.
+        task_path.write_text(description, encoding="utf-8")
+
+        task = discover_task(task_path)
+
+        assert task.metric == metric
+        assert task.task_type == task_type

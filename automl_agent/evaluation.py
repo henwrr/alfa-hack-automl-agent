@@ -113,11 +113,16 @@ def score_trial(task: TaskSpec, split: dict, trial_dir: Path) -> dict[str, float
     if task.task_type == "regression":
         y_true = _as_float_array(actual, "validation_target")
         y_pred = _as_float_array(predicted, "valid_predictions")
-        scores.update({
+        candidates = {
             "rmse": float(np.sqrt(mean_squared_error(y_true, y_pred))),
             "mae": float(mean_absolute_error(y_true, y_pred)),
-            "r2": float(r2_score(y_true, y_pred)),
-        })
+        }
+        if len(y_true) < 2:
+            if primary == "r2":
+                raise ValueError("Primary metric r2 is undefined with one validation row")
+        else:
+            candidates["r2"] = float(r2_score(y_true, y_pred))
+        scores.update({name: value for name, value in candidates.items() if np.isfinite(value)})
     elif task.task_type == "classification":
         labels = _classes(task, actual, predicted)
         if primary == "f1" and len(labels) != 2:
@@ -166,7 +171,7 @@ def score_trial(task: TaskSpec, split: dict, trial_dir: Path) -> dict[str, float
         raise ValueError(f"Неподдерживаемый task_type: {task.task_type}")
 
     if primary not in scores:
-        raise ValueError(f"Неподдерживаемая для {task.task_type} метрика: {task.metric}")
+        raise ValueError(f"Основная метрика {task.metric!r} не поддерживается или не определена для validation данных")
     scores[task.metric] = float(scores[primary])
     return scores
 

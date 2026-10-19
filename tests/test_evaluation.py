@@ -1,3 +1,5 @@
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -123,6 +125,37 @@ def test_f1_metric_rejects_multiclass_instead_of_silently_using_macro(tmp_path):
     pd.DataFrame({"label": ["a", "b", "c"]}).to_csv(trial / "valid_predictions.csv", index=False)
 
     with pytest.raises(ValueError, match="бинарной задачи"):
+        score_trial(task, {"validation_target": str(split / "validation_target.csv")}, trial)
+
+
+def test_one_row_rmse_omits_undefined_r2_and_serializes_strictly(tmp_path):
+    task = make_task(tmp_path)
+    split = tmp_path / "split"
+    trial = tmp_path / "trial"
+    split.mkdir()
+    trial.mkdir()
+    pd.DataFrame({"label": [3.0]}).to_csv(split / "validation_target.csv", index=False)
+    pd.DataFrame({"label": [2.0]}).to_csv(trial / "valid_predictions.csv", index=False)
+
+    metrics = score_trial(task, {"validation_target": str(split / "validation_target.csv")}, trial)
+
+    assert metrics["rmse"] == pytest.approx(1.0)
+    assert "r2" not in metrics
+    assert all(np.isfinite(value) for value in metrics.values())
+    json.dumps(metrics, allow_nan=False)
+
+
+def test_one_row_primary_r2_raises_clear_error(tmp_path):
+    task = make_task(tmp_path)
+    task.metric = "r2"
+    split = tmp_path / "split"
+    trial = tmp_path / "trial"
+    split.mkdir()
+    trial.mkdir()
+    pd.DataFrame({"label": [3.0]}).to_csv(split / "validation_target.csv", index=False)
+    pd.DataFrame({"label": [2.0]}).to_csv(trial / "valid_predictions.csv", index=False)
+
+    with pytest.raises(ValueError, match="r2.*one validation row"):
         score_trial(task, {"validation_target": str(split / "validation_target.csv")}, trial)
 
 

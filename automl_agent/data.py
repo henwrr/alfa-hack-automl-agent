@@ -23,6 +23,23 @@ _KIND_NAMES = {
     "dictionary": {"data_dictionary.csv", "dictionary.csv", "schema.csv"},
     "sample": {"sample_submission.csv", "submission_sample.csv", "sample.csv"},
 }
+_METRIC_PATTERNS = (
+    (r"macro[\s_-]*f1|f1[_\s-]*score\s*\([^)]*macro", "macro_f1"),
+    (r"root[\s_-]*mean[\s_-]*square[\s_-]*error|\brmse\b", "rmse"),
+    (r"\bweighted[\s_-]*f1\b", "weighted_f1"),
+    (r"\broc[\s_-]*auc\b|\bauc\b", "roc_auc"),
+    (r"\blog[\s_-]*loss\b", "log_loss"),
+    (r"\baccuracy\b|точност[ья]", "accuracy"),
+    (r"\bmae\b|mean[\s_-]*absolute[\s_-]*error", "mae"),
+    (r"\br2\b|r\^2|коэффициент детерминации", "r2"),
+    (r"\bf1\b", "f1"),
+)
+_EXPLICIT_METRIC_MARKERS = (
+    re.compile(r"\b(?:primary|main)\b[^\n.;]*?\bmetric\b\s*(?:is\b|[:=—-])?", re.IGNORECASE),
+    re.compile(r"основн\w*[^\n.;]*?метрик\w*\s*(?:это\b|[:=—-])?", re.IGNORECASE),
+    re.compile(r"(?:^|[.;]\s*)(?:[-*#]\s*)?(?:evaluation\s+)?metric(?:\s+(?:for|of)\s+evaluation)?\s*(?:is\b|[:=—-])", re.IGNORECASE),
+    re.compile(r"(?:^|[.;]\s*)(?:[-*#]\s*)?метрик\w*(?:\s+оценки)?\s*(?:is\b|[:=—-])", re.IGNORECASE),
+)
 
 
 def _absolute(path: Path) -> str:
@@ -113,18 +130,42 @@ def _role_has(role: str, tokens: tuple[str, ...]) -> bool:
 
 def _metric_from_text(text: str) -> str | None:
     lower = text.lower().replace("‑", "-")
-    patterns = (
-        (r"macro[\s_-]*f1|f1[_\s-]*score\s*\([^)]*macro", "macro_f1"),
-        (r"root[\s_-]*mean[\s_-]*square[\s_-]*error|\brmse\b", "rmse"),
-        (r"\bweighted[\s_-]*f1\b", "weighted_f1"),
-        (r"\broc[\s_-]*auc\b|\bauc\b", "roc_auc"),
-        (r"\blog[\s_-]*loss\b", "log_loss"),
-        (r"\baccuracy\b|точност[ья]", "accuracy"),
-        (r"\bmae\b|mean[\s_-]*absolute[\s_-]*error", "mae"),
-        (r"\br2\b|r\^2|коэффициент детерминации", "r2"),
-        (r"\bf1\b", "f1"),
-    )
-    for pattern, metric in patterns:
+    lines = lower.splitlines()
+
+    def first_mentioned_metric(segment: str) -> str | None:
+        matches = []
+        for pattern, metric in _METRIC_PATTERNS:
+            for match in re.finditer(pattern, segment):
+                matches.append((match.start(), -(match.end() - match.start()), metric))
+        return min(matches)[2] if matches else None
+
+    # An explicitly identified primary/main/assessment metric outranks any
+    # reference metric elsewhere in the same line or document. Inspect text
+    # after the marker so e.g. "RMSE diagnostic; primary metric: MAE" works too.
+    for line_index, line in enumerate(lines):
+        for marker in _EXPLICIT_METRIC_MARKERS:
+            match = marker.search(line)
+            if not match:
+                continue
+            tail = line[match.end():]
+            metric = first_mentioned_metric(tail)
+            if metric:
+                return metric
+            # Support common Markdown where the metric value wraps to the next line.
+            for continuation in lines[line_index + 1:line_index + 3]:
+                continuation = continuation.strip()
+                if not continuation:
+                    continue
+                if continuation.startswith(("#", "-", "*")):
+                    break
+                metric = first_mentioned_metric(continuation)
+                if metric:
+                    return metric
+                break
+
+    # Descriptions without an explicit primary marker retain a deterministic
+    # generic fallback using the recognized metric family priority.
+    for pattern, metric in _METRIC_PATTERNS:
         if re.search(pattern, lower):
             return metric
     return None
