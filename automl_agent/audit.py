@@ -180,6 +180,12 @@ def _source_for(event: str, payload: dict, baseline_trials: dict[str, bool]) -> 
 
 
 def _details_for(event: str, payload: dict) -> dict:
+    if event in {"family_comparison_started", "family_comparison_completed"}:
+        return _selected(payload, ("families", "planned", "limited_by_trial_budget", "split_fingerprint", "comparison"))
+    if event in {"batch_started", "batch_completed", "batch_interrupted"}:
+        return _selected(payload, ("trial_ids", "origin", "parallel_trials", "threads_per_trial", "memory_limit_mb", "remaining_seconds"))
+    if event == "reserve_updated":
+        return _selected(payload, ("previous_reserve", "plan", "remaining_seconds"))
     if event in {"data_profiled", "validation_planned"}:
         return _selected(payload, ("summary",))
     if event == "research_strategy":
@@ -370,6 +376,18 @@ def _render_human(record: dict) -> str:
 
 
 def _event_text(event: str, details: dict) -> str:
+    if event == "family_comparison_started":
+        return f"Сравнение семейств на общем split: {_human_value(details.get('families'))}; новых опытов={details.get('planned')}; ограничено числом trials={details.get('limited_by_trial_budget')}."
+    if event == "family_comparison_completed":
+        return f"Результаты сравнения семейств: {_human_value(details.get('comparison'))}."
+    if event == "batch_started":
+        return f"Запущена группа {_human_value(details.get('trial_ids'))}: до {details.get('parallel_trials')} процессов по {details.get('threads_per_trial')} CPU; лимит RSS одного {details.get('memory_limit_mb')} MB."
+    if event == "batch_completed":
+        return f"Группа {_human_value(details.get('trial_ids'))} завершена; осталось на исследования {details.get('remaining_seconds')} с."
+    if event == "batch_interrupted":
+        return f"Группа прервана; процессы остановлены, неизвестные исходы будут отмечены при resume: {_human_value(details.get('trial_ids'))}."
+    if event == "reserve_updated":
+        return f"Пересчитан резерв финального обучения: {_human_value(details.get('plan'))}; осталось всего {details.get('remaining_seconds')} с."
     if event == "run_started":
         return "Начат новый запуск исследования."
     if event == "run_resumed":

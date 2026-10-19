@@ -11,3 +11,6 @@
 | P9 | packaging, review, remote SHA | — | — | ожидается |
 
 Доказательства: статусы, измеренные интервалы процессов, n_jobs, fingerprint split, CSV validator, модель reload/predict. API организаторов и Docker остаются вне доступного окружения. Логи команд в logs/.
+
+## Интеграция
+Первый red: реальные failures нового batch tool, tie selection и defaultconfig; два offline-fixture сначала требовали исправления настройки до проверки поведения. Затем интеграция выявила отсутствие model_family в декларативном decision генератора; добавлены публичные объяснения с явным семейством. Старые тесты одиночного baseline явно используют --family-trials1. Для ограниченного token budget введён компактный systemprompt с сохранением contracts и последней tool-группы. Итог: 160 passed, 1 ConvergenceWarning на маленьком линейном fixture, 44.43s, exit0.

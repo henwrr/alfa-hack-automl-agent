@@ -24,8 +24,10 @@ class Config:
     max_trials: int = 6
     max_steps: int = 14
     max_tokens: int = 100000
-    response_tokens: int = 3072
+    response_tokens: int = 6144
     n_jobs: int = 4
+    parallel_trials: int = 2
+    family_trials: int = 3
     memory_limit_mb: int = 12000
     context_chars: int = 48000
     seed: int = 42
@@ -40,7 +42,8 @@ class Config:
 
     @property
     def reserve_seconds(self) -> float:
-        return min(600.0, max(1.0, self.time_budget * 0.15))
+        from .budgeting import initial_reserve_seconds
+        return initial_reserve_seconds(self.time_budget)
 
     def public_dict(self) -> dict:
         data = asdict(self)
@@ -58,8 +61,10 @@ def parse_config(argv=None) -> Config:
     parser.add_argument("--max-trials", type=int, default=6, help="Includes the baseline and failed trials")
     parser.add_argument("--max-steps", type=int, default=14)
     parser.add_argument("--max-tokens", type=int, default=100000, help="Total input + output token budget")
-    parser.add_argument("--response-tokens", type=int, default=3072)
-    parser.add_argument("--n-jobs", type=int, default=min(4, os.cpu_count() or 1))
+    parser.add_argument("--response-tokens", type=int, default=6144)
+    parser.add_argument("--n-jobs", type=int, default=4, help="Threads per trial; total parallel allocation must be <=8")
+    parser.add_argument("--parallel-trials", type=int, choices=[1, 2], default=2)
+    parser.add_argument("--family-trials", type=int, choices=[1, 2, 3], default=3, help="Maximum warm-up families; 1 keeps only the legacy baseline")
     parser.add_argument("--memory-limit-mb", type=int, default=12000)
     parser.add_argument("--context-chars", type=int, default=48000)
     parser.add_argument("--seed", type=int, default=42)
@@ -93,6 +98,10 @@ def parse_config(argv=None) -> Config:
             parser.error(f"--{name.replace('_', '-')} must be positive")
     if not 1 <= args.n_jobs <= 8:
         parser.error("--n-jobs must be between 1 and 8")
+    if args.n_jobs * args.parallel_trials > 8:
+        parser.error("--parallel-trials times --n-jobs must be <=8")
+    if args.memory_limit_mb * args.parallel_trials > 28000:
+        parser.error("Parallel worker RSS caps must sum to <=28000 MB")
     if not 0.05 <= args.validation_fraction <= 0.5:
         parser.error("--validation-fraction must be between 0.05 and 0.5")
     if args.resume and args.run_dir is None:

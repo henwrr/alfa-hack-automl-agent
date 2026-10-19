@@ -23,7 +23,7 @@ def make_task(path):
 
 def config_for(task, directory, *extra):
     return parse_config([str(task), '--run-dir', str(directory), '--time-budget', '90', '--trial-timeout', '20',
-                         '--max-trials', '2', '--n-jobs', '1', *extra])
+                         '--max-trials', '2', '--n-jobs', '1', '--family-trials', '1', *extra])
 
 
 def events(directory):
@@ -106,7 +106,7 @@ def test_strategy_uses_data_facts_and_available_packages():
     assert strategy['facts']['class_imbalance_ratio'] == 9
     assert strategy['facts']['features_with_missing'] == 1
     assert strategy['budget']['finalization_reserve_seconds'] == 600
-    assert strategy['parallel_trials'] == 1
+    assert strategy['parallel_trials'] == 2
     assert any('class' in item.lower() or 'дисбаланс' in item.lower() for item in strategy['priorities'])
     profile['available_packages']['catboost'] = 'unavailable'
     other = plan_research(task, profile, config)

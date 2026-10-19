@@ -111,7 +111,7 @@ def test_resume_uses_durable_response_and_usage_without_another_api_call(tmp_pat
     task = make_task(tmp_path / "dataset")
     directory = tmp_path / "run"
     args = [str(task), "--run-dir", str(directory), "--time-budget", "90", "--max-trials", "2", "--n-jobs", "1"]
-    run(parse_config([*args, "--offline"]))
+    run(parse_config([*args, "--offline", "--family-trials", "1"]))
     state = json.loads((directory / "state.json").read_text())
     state.update(active=True, total_tokens=0, llm_calls=0, checkpoint_epoch=time.time())
     atomic_write_json(directory / "state.json", state)

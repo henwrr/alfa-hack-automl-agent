@@ -65,6 +65,8 @@ def parse_response_calls(message):
     if not isinstance(action, dict):
         raise ValueError("A tool action must be an object")
     name = action.get("tool", action.get("action", action.get("name")))
+    if name is None and "experiments" in action:
+        name = "run_experiments"
     if name is None and "code" in action:
         name = "run_experiment"
     if name is None and "reason" in action:

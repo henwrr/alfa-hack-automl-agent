@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 import fcntl
 import hashlib
@@ -20,6 +20,8 @@ from .contracts import ExperimentResult
 
 def select_best(results, maximize):
     valid = [r for r in results if r.status == "ok" and r.metric is not None and math.isfinite(r.metric)]
+    if valid and all(r.trial_id.startswith("trial_") and r.trial_id[6:].isdigit() for r in valid):
+        valid.sort(key=lambda r: int(r.trial_id[6:]))
     return (max if maximize else min)(valid, key=lambda r: r.metric) if valid else None
 
 
@@ -77,6 +79,7 @@ class ResearchRun:
             raise ValueError("Input data or split settings changed (fingerprint mismatch); start a new run")
         self.journal = AuditJournal(self.directory / "events.jsonl", secrets=[config.api_key] if config.api_key else [])
         self.results = []
+        self.active_trials = {}
         # The event log is authoritative if the process died before state.json was updated.
         completed = {r["trial_id"]: r for r in self.state.get("trials", [])}
         events = [{**event, **event.get("payload", {})} for event in self.journal.read_events()]
@@ -104,6 +107,7 @@ class ResearchRun:
         self._recover_calls(events)
         self._recover_model_state(events)
         self._recover_assessments()
+        self._update_reserve(record=False)
 
     def _recover_model_state(self, events):
         from .contracts import ModelResponse
@@ -143,7 +147,7 @@ class ResearchRun:
         for event in events:
             if event.get("event") == "trial_started" and event.get("trial_id") not in finished:
                 trial_id = event["trial_id"]
-                result = ExperimentResult(trial_id, "interrupted", str(self.directory / trial_id), event.get("code_hash", ""), event.get("hypothesis", ""), error="Outcome unknown after interrupted process; not replayed", is_baseline=event.get("is_baseline", False), decision=event.get("decision", {}))
+                result = ExperimentResult(trial_id, "interrupted", str(self.directory / trial_id), event.get("code_hash", ""), event.get("hypothesis", ""), error="Outcome unknown after interrupted process; not replayed", is_baseline=event.get("is_baseline", False), decision=event.get("decision", {}), origin=event.get("origin"))
                 self.results.append(result)
                 self.journal.append("trial_completed", result=result.to_dict())
                 finished.add(trial_id)
@@ -177,7 +181,8 @@ class ResearchRun:
         state = {"version": 1, "data_fingerprint": self.task.data_fingerprint, "settings_fingerprint": self.signature,
                  "elapsed_seconds": self.budget.elapsed(), "checkpoint_epoch": time.time(), "active": active,
                  "total_tokens": self.tokens_used, "llm_calls": self.steps, "trials": [r.to_dict() for r in self.results],
-                 "selected_trial": best.trial_id if best else None, "stop_reason": self.stop_reason}
+                 "selected_trial": best.trial_id if best else None, "stop_reason": self.stop_reason,
+                 "active_trials": list(self.active_trials), "reserve_plan": self.reserve_plan}
         state = self.journal.redact(state)
         atomic_write_json(self.state_path, state)
         atomic_write_json(self.directory / "experiments.json", {"trials": state["trials"], "selected_trial": state["selected_trial"]})
@@ -261,78 +266,173 @@ class ResearchRun:
         indices = [int(p.name.split("_")[1]) for p in self.directory.glob("trial_*") if p.is_dir() and p.name.split("_")[1].isdigit()]
         return f"trial_{max(indices, default=0) + 1:04d}"
 
-    def experiment(self, hypothesis, code, is_baseline=False, decision=None):
-        from .evaluation import publish_submission, score_trial
-        from .journal import atomic_write_json
-        from .runtime import run_process
-        from .tools import validate_candidate_code
-        from .strategy import assess_experiment
+    def _update_reserve(self, record=True):
+        from .budgeting import plan_finalization
+        best = select_best(self.results, self.task.maximize)
+        plan = plan_finalization(total_seconds=self.config.time_budget, validation_fraction=self.task.validation_fraction,
+                                 best=best, train_rows=(self.profile or {}).get('train_shape', [None])[0])
+        previous = getattr(self, 'reserve_plan', None)
+        self.reserve_plan = plan
+        self.budget.reserve_seconds = plan['reserve_seconds']
+        if record and previous != plan:
+            self.journal.append('reserve_updated', previous_reserve=previous.get('reserve_seconds') if previous else None,
+                                plan=plan, remaining_seconds=round(self.budget.remaining(), 3))
 
-        if len(self.results) >= self.config.max_trials:
-            raise ValueError("Experiment budget exhausted")
+    def _prepare_trial(self, hypothesis, code, is_baseline=False, decision=None, origin='llm'):
+        from .journal import atomic_write_json
+        from .tools import validate_candidate_code
+        if len(self.results) + len(self.active_trials) >= self.config.max_trials:
+            raise ValueError('Experiment budget exhausted')
         remaining = self.budget.research_remaining()
         if remaining <= 0:
-            raise ValueError("Research deadline reached; finalization time is reserved")
+            raise ValueError('Research deadline reached; finalization time is reserved')
         code_hash = hashlib.sha256(code.encode()).hexdigest()
-        if any(r.code_hash == code_hash for r in self.results):
-            raise ValueError("Duplicate code: propose a different hypothesis or fix the previous error")
+        if any(r.code_hash == code_hash for r in [*self.results, *self.active_trials.values()]):
+            raise ValueError('Duplicate code: propose a different hypothesis or fix the previous error')
         trial_id = self._next_trial_id()
         directory = self.directory / trial_id
         directory.mkdir()
-        (directory / "code.py").write_text(code, encoding="utf-8")
-        previous_best = select_best(self.results, self.task.maximize)
-        result = ExperimentResult(trial_id, "error", str(directory), code_hash, hypothesis, is_baseline=is_baseline, decision=decision or {})
-        explanation = {"trial_id": trial_id, "source": "harness" if is_baseline else "llm", "hypothesis": hypothesis,
-                       "decision": result.decision, "explanation_provided": bool(result.decision)}
-        # Persist the public explanation before running untrusted candidate code.
-        recorded = self.journal.append("decision_recorded", **explanation)
-        result.decision = recorded["payload"]["decision"]
-        result.hypothesis = recorded["payload"]["hypothesis"]
-        atomic_write_json(directory / "decision.json", recorded["payload"])
-        self.journal.append("trial_started", trial_id=trial_id, code_hash=code_hash, hypothesis=result.hypothesis, is_baseline=is_baseline, decision=result.decision)
+        (directory / 'code.py').write_text(code, encoding='utf-8')
+        result = ExperimentResult(trial_id, 'error', str(directory), code_hash, hypothesis,
+                                  is_baseline=is_baseline, decision=decision or {}, origin=origin)
+        recorded = self.journal.append('decision_recorded', trial_id=trial_id, source='harness' if is_baseline else 'llm',
+                                       hypothesis=hypothesis, decision=result.decision, explanation_provided=bool(result.decision))
+        result.decision = recorded['payload']['decision']
+        result.hypothesis = recorded['payload']['hypothesis']
+        atomic_write_json(directory / 'decision.json', recorded['payload'])
+        self.active_trials[trial_id] = result
+        self.journal.append('trial_started', trial_id=trial_id, code_hash=code_hash, hypothesis=result.hypothesis,
+                            is_baseline=is_baseline, origin=origin, decision=result.decision)
         self.checkpoint()
         try:
             validate_candidate_code(code)
-            manifest = {"mode": "evaluate", "context": self.task.model_context(self.config.n_jobs),
-                        "inputs": {key: self.split[key] for key in ("train_features", "train_target", "validation_features", "test_features")},
-                        "code_path": str(directory / "code.py"), "artifact_dir": str(directory), "save_model": True}
-            atomic_write_json(directory / "manifest.json", manifest)
-            process = run_process([sys.executable, "-m", "automl_agent.worker", "--manifest", str(directory / "manifest.json")],
-                                  cwd=directory, timeout=min(self.config.trial_timeout, remaining), n_jobs=self.config.n_jobs,
-                                  memory_limit_mb=self.config.memory_limit_mb, env={"PYTHONPATH": str(Path(__file__).resolve().parent.parent)})
-            atomic_write_json(directory / "process.json", self.journal.redact(process.to_dict()))
-            result.seconds = process.seconds
-            result.status = process.status
-            if process.status == "ok":
-                result.model_details = _read_json(directory / "worker_result.json", {}).get("estimator_details", {})
-                result.metrics = score_trial(self.task, self.split, directory)
-                result.metric = float(result.metrics[self.task.metric])
-                if not math.isfinite(result.metric):
-                    raise ValueError("Evaluator returned a non-finite metric")
-                result.prediction_path = str(directory / "test_predictions.csv")
-                publish_submission(self.task, Path(result.prediction_path), directory / "submission.csv")
-                if (directory / "model.joblib").exists():
-                    result.model_path = str(directory / "model.joblib")
+        except ValueError as exc:
+            result.status, result.error = 'invalid_code', str(exc)[-4000:]
+            return result, None
+        manifest = {'mode': 'evaluate', 'context': self.task.model_context(self.config.n_jobs),
+                    'inputs': {key: self.split[key] for key in ('train_features', 'train_target', 'validation_features', 'test_features')},
+                    'code_path': str(directory / 'code.py'), 'artifact_dir': str(directory), 'save_model': True}
+        atomic_write_json(directory / 'manifest.json', manifest)
+        return result, {'argv': [sys.executable, '-m', 'automl_agent.worker', '--manifest', str(directory / 'manifest.json')],
+                        'cwd': directory, 'timeout': min(self.config.trial_timeout, remaining), 'n_jobs': self.config.n_jobs,
+                        'memory_limit_mb': self.config.memory_limit_mb, 'env': {'PYTHONPATH': str(Path(__file__).resolve().parent.parent)}}
+
+    def _commit_trial(self, result, process=None):
+        from .evaluation import publish_submission, score_trial
+        from .journal import atomic_write_json
+        from .strategy import assess_experiment
+        previous_best = select_best(self.results, self.task.maximize)
+        directory = Path(result.artifact_dir)
+        if process is not None:
+            atomic_write_json(directory / 'process.json', self.journal.redact(process.to_dict()))
+            result.seconds, result.status = process.seconds, process.status
+            if process.status == 'ok':
+                try:
+                    result.model_details = _read_json(directory / 'worker_result.json', {}).get('estimator_details', {})
+                    result.metrics = score_trial(self.task, self.split, directory)
+                    result.metric = float(result.metrics[self.task.metric])
+                    if not math.isfinite(result.metric):
+                        raise ValueError('Evaluator returned a non-finite metric')
+                    result.prediction_path = str(directory / 'test_predictions.csv')
+                    publish_submission(self.task, Path(result.prediction_path), directory / 'submission.csv')
+                    if (directory / 'model.joblib').exists():
+                        result.model_path = str(directory / 'model.joblib')
+                except Exception as exc:
+                    result.status = 'invalid_output'
+                    result.error = f'{type(exc).__name__}: {exc}'[-4000:]
             else:
                 result.error = (process.stderr or process.stdout or process.status)[-4000:]
-        except ValueError as exc:
-            result.status = "invalid_output" if (directory / "process.json").exists() else "invalid_code"
-            result.error = str(exc)[-4000:]
-        except Exception as exc:
-            result.status = "error"
-            result.error = f"{type(exc).__name__}: {exc}"[-4000:]
         result = ExperimentResult.from_dict(self.journal.redact(result.to_dict()))
+        self.active_trials.pop(result.trial_id, None)
         self.results.append(result)
-        completion = self.journal.append("trial_completed", result=result.to_dict())
-        self.journal.append("experiment_assessed", **assess_experiment(result, previous_best, self.task.maximize, self.task.metric), completion_seq=completion["seq"])
+        self.results.sort(key=lambda r: r.trial_id)
+        completion = self.journal.append('trial_completed', result=result.to_dict())
+        self.journal.append('experiment_assessed', **assess_experiment(result, previous_best, self.task.maximize, self.task.metric), completion_seq=completion['seq'])
         best = select_best(self.results, self.task.maximize)
         if best is result:
             publish_submission(self.task, Path(result.prediction_path), self.output)
-            self.journal.append("candidate_selected", trial_id=trial_id, metric=result.metric, submission_path=str(self.output))
+            self.journal.append('candidate_selected', trial_id=result.trial_id, metric=result.metric, submission_path=str(self.output))
+        self._update_reserve()
         self.checkpoint()
-        if result.status == "cancelled":
-            raise KeyboardInterrupt
         return result
+
+    def experiment_batch(self, experiments, is_baseline=False, origin='llm'):
+        from .scheduler import run_parallel_processes
+        outcomes = [None] * len(experiments)
+        prepared = []
+        for index, proposal in enumerate(experiments):
+            try:
+                result, job = self._prepare_trial(proposal['hypothesis'], proposal['code'], is_baseline,
+                                                  proposal.get('decision'), origin)
+                if job is None:
+                    outcomes[index] = self._commit_trial(result)
+                else:
+                    prepared.append((index, result, job))
+            except ValueError as exc:
+                outcomes[index] = {'error': str(exc)}
+        if not prepared:
+            return outcomes
+        ids = [result.trial_id for _, result, _ in prepared]
+        self.journal.append('batch_started', trial_ids=ids, origin=origin, parallel_trials=self.config.parallel_trials,
+                            threads_per_trial=self.config.n_jobs, memory_limit_mb=self.config.memory_limit_mb)
+        try:
+            with closing(run_parallel_processes([job for _, _, job in prepared], max_workers=self.config.parallel_trials,
+                                                 research_remaining=self.budget.research_remaining)) as completed:
+                for index, process in completed:
+                    output_index, result, _ = prepared[index]
+                    outcomes[output_index] = self._commit_trial(result, process)
+        except KeyboardInterrupt:
+            self.journal.append('batch_interrupted', trial_ids=list(self.active_trials))
+            self.checkpoint()
+            raise
+        self.journal.append('batch_completed', trial_ids=ids, remaining_seconds=round(self.budget.research_remaining(), 3))
+        return outcomes
+
+    def experiment(self, hypothesis, code, is_baseline=False, decision=None):
+        result = self.experiment_batch([{'hypothesis': hypothesis, 'code': code, 'decision': decision}],
+                                       is_baseline=is_baseline, origin='baseline' if is_baseline else 'llm')[0]
+        if isinstance(result, dict):
+            raise ValueError(result['error'])
+        return result
+
+    def _family_comparison(self, strategy):
+        from .families import family_candidates
+        from .journal import atomic_write_json
+        from .modeling import baseline_code
+        from .strategy import baseline_decision
+        candidates = family_candidates(self.task, self.profile, n_jobs=self.config.n_jobs, limit=self.config.family_trials)
+        # Preserve two LLM attempt slots. If a complete requested comparison
+        # cannot fit, start from the legacy baseline and say why in the log.
+        limited = not self.config.offline and self.config.max_trials < len(candidates) + 2
+        if self.config.family_trials == 1 or limited:
+            candidates = [{'family': baseline_decision(strategy)['model_family'], 'hypothesis': 'Проверить надёжный baseline перед LLM-исследованием',
+                           'code': baseline_code(self.task, n_jobs=self.config.n_jobs), 'decision': baseline_decision(strategy)}]
+        attempted = {r.decision.get('model_family') for r in self.results if r.is_baseline}
+        proposed = [p for p in candidates if p['family'] not in attempted]
+        proposed = proposed[:max(0, self.config.max_trials - len(self.results))]
+        self.journal.append('family_comparison_started', families=[p['family'] for p in candidates],
+                            planned=len(proposed), limited_by_trial_budget=limited, split_fingerprint=self.split['split_fingerprint'])
+        if proposed and self.budget.research_remaining() > 0:
+            self.experiment_batch(proposed, is_baseline=True, origin='family')
+        trials = [r for r in self.results if r.is_baseline]
+        best = select_best(trials, self.task.maximize)
+        comparison = {'split_fingerprint': self.split['split_fingerprint'], 'metric': self.task.metric,
+                      'maximize': self.task.maximize, 'limited_by_trial_budget': limited,
+                      'trials': [{'family': r.decision.get('model_family', 'legacy'), 'trial_id': r.trial_id,
+                                  'status': r.status, 'metric': r.metric, 'seconds': r.seconds, 'model_details': r.model_details} for r in trials],
+                      'selected_trial': best.trial_id if best else None}
+        atomic_write_json(self.directory / 'family_comparison.json', self.journal.redact(comparison))
+        self.profile["family_comparison"] = comparison
+        self.journal.append('family_comparison_completed', comparison=comparison)
+
+    def _llm_experiments(self, experiments):
+        if len(experiments) > self.config.parallel_trials:
+            raise ValueError('Batch size exceeds --parallel-trials; use run_experiment for one candidate')
+        results = self.experiment_batch(experiments)
+        best = select_best(self.results, self.task.maximize)
+        return {'trials': [({'trial_id': r.trial_id, 'status': r.status, 'metrics': r.metrics, 'error': r.error,
+                            'model_details': r.model_details, 'selected': best is r} if isinstance(r, ExperimentResult) else r) for r in results],
+                'best_metric': best.metric if best else None, 'selected_trial': best.trial_id if best else None}
 
     def _llm_experiment(self, hypothesis, code, decision=None):
         result = self.experiment(hypothesis, code, decision=decision)
@@ -361,6 +461,11 @@ class ResearchRun:
         registry = ToolRegistry()
         registry.register("run_experiment", "Test a concrete ML hypothesis with complete build_model(context) Python source.",
                           {"type": "object", "properties": {"hypothesis": {"type": "string", "minLength": 1, "maxLength": 6000}, "code": {"type": "string", "minLength": 1, "maxLength": 64000}, "decision": DECISION_SCHEMA}, "required": ["hypothesis", "code"], "additionalProperties": False}, self._llm_experiment)
+        proposal_schema = registry.tools["run_experiment"][1]
+        registry.register("run_experiments", "Evaluate two independent hypotheses in parallel on the same holdout; return separate outcomes.",
+                          {"type": "object", "properties": {"experiments": {"type": "array", "minItems": 1,
+                           "maxItems": self.config.parallel_trials, "items": proposal_schema}},
+                           "required": ["experiments"], "additionalProperties": False}, self._llm_experiments)
         registry.register("finish_research", "Stop research after a successful generated candidate; host refits the best model.",
                           {"type": "object", "properties": {"reason": {"type": "string", "minLength": 1, "maxLength": 4000}}, "required": ["reason"], "additionalProperties": False}, self._finish)
         for request_id, response in self.pending_responses:
@@ -377,7 +482,8 @@ class ResearchRun:
             best = select_best(self.results, self.task.maximize)
             messages = build_messages(self.task, self.profile, self.results, best,
                                       {"n_jobs": self.config.n_jobs, "remaining_seconds": round(self.budget.research_remaining(), 2),
-                                       "trial_timeout": self.config.trial_timeout, "remaining_trials": self.config.max_trials - len(self.results)},
+                                       "trial_timeout": self.config.trial_timeout, "remaining_trials": self.config.max_trials - len(self.results),
+                                       "parallel_trials": self.config.parallel_trials, "reserve_plan": self.reserve_plan},
                                       feedback=self.feedback, context_chars=self.config.context_chars, compact=compact)
             # Keep complete recent assistant/tool groups. Older attempts remain
             # available through the structured ledger and the durable journal.
@@ -427,7 +533,8 @@ class ResearchRun:
         from .journal import atomic_write_json
         from .runtime import run_process
 
-        if best is None or self.budget.remaining() <= 2:
+        write_margin = max(1.0, self.reserve_plan.get("overhead_seconds", 0.0))
+        if best is None or self.budget.remaining() <= write_margin + 0.1:
             return {"status": "skipped", "reason": "No candidate or no remaining time"}
         directory = self.directory / ("final_" + uuid4().hex[:8])
         directory.mkdir()
@@ -437,10 +544,10 @@ class ResearchRun:
             "train_features": self.split["full_train_features"], "train_target": self.split["full_train_target"], "test_features": self.split["test_features"]},
             "code_path": str(directory / "code.py"), "artifact_dir": str(directory), "save_model": True}
         atomic_write_json(directory / "manifest.json", manifest)
-        self.journal.append("final_fit_started", trial_id=best.trial_id, artifact_dir=str(directory))
+        self.journal.append("final_fit_started", trial_id=best.trial_id, artifact_dir=str(directory), reserve_plan=self.reserve_plan, timeout_seconds=max(0.1, self.budget.remaining() - write_margin))
         self.checkpoint()
         process = run_process([sys.executable, "-m", "automl_agent.worker", "--manifest", str(directory / "manifest.json")],
-                              cwd=directory, timeout=min(self.config.trial_timeout, self.budget.remaining() - 1), n_jobs=self.config.n_jobs,
+                              cwd=directory, timeout=max(0.1, self.budget.remaining() - write_margin), n_jobs=self.config.n_jobs,
                               memory_limit_mb=self.config.memory_limit_mb, env={"PYTHONPATH": str(Path(__file__).resolve().parent.parent)})
         atomic_write_json(directory / "process.json", self.journal.redact(process.to_dict()))
         outcome = {"status": process.status, "artifact_dir": str(directory), "seconds": process.seconds}
@@ -495,6 +602,7 @@ class ResearchRun:
         atomic_write_json(self.directory / "environment.json", {"python": sys.version, "platform": platform.platform(), "packages": versions})
         self.profile = profile_task(self.task)
         self.profile["available_packages"] = versions
+        self._update_reserve()
         strategy = plan_research(self.task, self.profile, self.config)
         self.profile["research_strategy"] = strategy
         atomic_write_json(self.directory / "strategy.json", strategy)
@@ -512,8 +620,8 @@ class ResearchRun:
             self._restore_best_submission()
         self.checkpoint()
         try:
-            if not self.results and self.budget.research_remaining() > 0:
-                self.experiment("Проверить надёжный baseline перед LLM-исследованием", baseline_code(self.task, n_jobs=self.config.n_jobs), is_baseline=True, decision=baseline_decision(strategy))
+            if self.budget.research_remaining() > 0:
+                self._family_comparison(strategy)
             if not self.config.offline:
                 self.research()
             best = select_best(self.results, self.task.maximize)
@@ -537,7 +645,9 @@ class ResearchRun:
                   "trials": [r.to_dict() for r in self.results], "llm_calls": self.steps, "llm_trials": llm_trials,
                   "total_tokens": self.tokens_used, "elapsed_seconds": round(self.budget.elapsed(), 3),
                   "submission_path": str(self.output), "run_dir": str(self.directory), "final_fit": final_fit, "validation": validation,
-                  "decision_log": str(self.directory / "agent.log"), "decisions_path": str(self.directory / "decisions.jsonl")}
+                  "decision_log": str(self.directory / "agent.log"), "decisions_path": str(self.directory / "decisions.jsonl"),
+                  "reserve_plan": self.reserve_plan, "parallel_trials": self.config.parallel_trials,
+                  "threads_per_trial": self.config.n_jobs, "family_comparison_path": str(self.directory / "family_comparison.json")}
         report = self.journal.redact(report)
         atomic_write_json(self.directory / "report.json", report)
         rows = ["# AutoResearch run", "", f"Status: {status}; stop: {self.stop_reason}", f"Metric: {self.task.metric}; best validation: {report['best_metric']}",
@@ -550,7 +660,7 @@ class ResearchRun:
                  "Generated code runs in a supervised subprocess. Use the deployment container for OS-level filesystem/network isolation."]
         (self.directory / "report.md").write_text(self.journal.redact("\n".join(rows) + "\n"), encoding="utf-8")
         self.journal.append("run_completed", report=report)
-        self.checkpoint(active=False)
+        self.checkpoint(active=bool(self.active_trials))
         return report
 
 def run(config):

@@ -64,6 +64,7 @@ class ExperimentResult:
     model_path: str | None = None
     decision: dict[str, Any] = field(default_factory=dict)
     model_details: dict[str, Any] = field(default_factory=dict)
+    origin: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

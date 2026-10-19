@@ -276,9 +276,23 @@ def family_candidates(task, profile, n_jobs=4, limit=3):
     return [
         {
             "family": family,
-            "hypothesis": hypothesis,
+            "hypothesis": {
+                "CatBoost": "Сравнить CatBoost с нативными категориями и 150 итерациями на общем holdout.",
+                "ExtraTrees": "Сравнить ExtraTrees с ограниченной сложностью деревьев и кодированием категорий.",
+                "Linear": "Проверить линейную модель после масштабирования чисел и разреженного one-hot.",
+            }[family],
             "code": _source(default_n_jobs, family),
-            "decision": decision,
+            "decision": {**decision, "model_family": family,
+                         "observations": [f"Тип задачи: {task_type}; метрика: {metric}; категориальных признаков: {len(_value(task, 'categorical_columns', []) or [])}"],
+                         "rationale": {
+                             "CatBoost": "Нативная обработка категорий; сохраняем настройки ранее проверенного baseline.",
+                             "ExtraTrees": "Проверить другой тип ансамбля с контролируемыми памятью и сложностью деревьев.",
+                             "Linear": "Проверить более простую зависимость и стоимость обучения на разреженном представлении.",
+                         }[family],
+                         "alternatives": [other[0] for other in families if other[0] != family],
+                         "expected_effect": "Измерить качество семейства; улучшение заранее неизвестно.",
+                         "risks": ["Один holdout не доказывает статистически значимое преимущество; контролируем время и память."],
+                         "previous_result_assessment": "Начальное сравнение: результаты независимых кандидатов ещё не известны."},
         }
         for family, hypothesis, decision in families[:maximum]
     ]
