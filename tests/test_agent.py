@@ -7,6 +7,7 @@ import pytest
 from automl_agent.agent import run, select_best
 from automl_agent.config import parse_config
 from automl_agent.contracts import ExperimentResult
+from automl_agent.agent import _run_lock
 
 
 def trial(name, metric, status="ok"):
@@ -50,3 +51,22 @@ def test_offline_run_and_resume_preserve_valid_result(tmp_path):
     frame.to_csv(task.parent / "train.csv", index=False)
     with pytest.raises(ValueError, match="fingerprint|changed|измен"):
         run(parse_config([*args, "--resume"]))
+
+
+def test_concurrent_resume_cannot_settle_another_process_pending_call(tmp_path):
+    from automl_agent.journal import EventJournal, atomic_write_json
+
+    task = make_task(tmp_path / "dataset")
+    directory = tmp_path / "run"
+    args = [str(task), "--offline", "--run-dir", str(directory), "--time-budget", "90", "--n-jobs", "1"]
+    run(parse_config(args))
+    state = json.loads((directory / "state.json").read_text())
+    state["active"] = True
+    atomic_write_json(directory / "state.json", state)
+    journal = EventJournal(directory / "events.jsonl")
+    journal.append("tool_call", call_id="owned-by-running-process", name="run_experiment", arguments={"hypothesis": "pending"})
+    before = (directory / "events.jsonl").read_bytes()
+    with _run_lock(directory / "run.lock"):
+        with pytest.raises(ValueError, match="Another process"):
+            run(parse_config([*args, "--resume"]))
+    assert (directory / "events.jsonl").read_bytes() == before

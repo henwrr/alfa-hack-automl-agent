@@ -336,62 +336,64 @@ class ResearchRun:
         from .journal import atomic_write_json
         from .modeling import baseline_code
 
-        with _run_lock(self.directory / "run.lock"):
-            if self.config.resume and not self.state.get("active") and (self.directory / "report.json").exists():
-                validate_submission(self.task, self.output)
-                return _read_json(self.directory / "report.json")
-            self.journal.append("run_resumed" if self.config.resume else "run_started", config=self.config.public_dict(), data_fingerprint=self.task.data_fingerprint)
-            atomic_write_json(self.directory / "config.json", self.config.public_dict())
-            atomic_write_json(self.directory / "task.json", self.task.to_dict())
-            versions = {}
-            for name in ("numpy", "pandas", "scikit-learn", "catboost", "httpx", "psutil", "cloudpickle"):
-                try:
-                    versions[name] = importlib.metadata.version(name)
-                except importlib.metadata.PackageNotFoundError:
-                    versions[name] = "unavailable"
-            atomic_write_json(self.directory / "environment.json", {"python": sys.version, "platform": platform.platform(), "packages": versions})
-            self.profile = profile_task(self.task)
-            atomic_write_json(self.directory / "profile.json", self.profile)
-            self.split = prepare_split(self.task, self.directory)
-            atomic_write_json(self.directory / "split_manifest.json", self.split)
-            self._emergency_submission()
-            self.checkpoint()
+        if self.config.resume and not self.state.get("active") and (self.directory / "report.json").exists():
+            validate_submission(self.task, self.output)
+            return _read_json(self.directory / "report.json")
+        self.journal.append("run_resumed" if self.config.resume else "run_started", config=self.config.public_dict(), data_fingerprint=self.task.data_fingerprint)
+        atomic_write_json(self.directory / "config.json", self.config.public_dict())
+        atomic_write_json(self.directory / "task.json", self.task.to_dict())
+        versions = {}
+        for name in ("numpy", "pandas", "scikit-learn", "catboost", "httpx", "psutil", "cloudpickle"):
             try:
-                if not self.results and self.budget.research_remaining() > 0:
-                    self.experiment("Reliable baseline before LLM research", baseline_code(self.task, n_jobs=self.config.n_jobs), is_baseline=True)
-                if not self.config.offline:
-                    self.research()
-                best = select_best(self.results, self.task.maximize)
-                final_fit = self.finalize(best)
-            except KeyboardInterrupt:
-                self.stop_reason = "interrupted"
-                self.journal.append("run_interrupted")
-                self.checkpoint()
-                raise
-            except Exception as exc:
-                self.stop_reason = "orchestration_error"
-                self.journal.append("run_error", error=f"{type(exc).__name__}: {exc}")
-                best = select_best(self.results, self.task.maximize)
-                final_fit = {"status": "skipped", "reason": str(exc)}
-            validation = validate_submission(self.task, self.output)
-            llm_trials = sum(r.status == "ok" and not r.is_baseline for r in self.results)
-            status = "offline" if self.config.offline else ("completed" if llm_trials else "degraded")
-            report = {"status": status, "stop_reason": self.stop_reason, "task_type": self.task.task_type, "metric": self.task.metric,
-                      "best_metric": best.metric if best else None, "selected_trial": best.trial_id if best else None,
-                      "trials": [r.to_dict() for r in self.results], "llm_calls": self.steps, "llm_trials": llm_trials,
-                      "total_tokens": self.tokens_used, "elapsed_seconds": round(self.budget.elapsed(), 3),
-                      "submission_path": str(self.output), "run_dir": str(self.directory), "final_fit": final_fit, "validation": validation}
-            atomic_write_json(self.directory / "report.json", report)
-            rows = ["# AutoResearch run", "", f"Status: {status}; stop: {self.stop_reason}", f"Metric: {self.task.metric}; best validation: {report['best_metric']}",
-                    f"Submission: {self.output}", "", "| Trial | Status | Validation metric | Seconds |", "|---|---|---:|---:|"]
-            rows += [f"| {r.trial_id} | {r.status} | {r.metric} | {r.seconds:.2f} |" for r in self.results]
-            rows += ["", "The validation metric belongs to the fixed holdout experiment. The final refit uses all training rows.",
-                     "Generated code runs in a supervised subprocess. Use the deployment container for OS-level filesystem/network isolation."]
-            (self.directory / "report.md").write_text("\n".join(rows) + "\n", encoding="utf-8")
-            self.journal.append("run_completed", report=report)
-            self.checkpoint(active=False)
-            return report
-
+                versions[name] = importlib.metadata.version(name)
+            except importlib.metadata.PackageNotFoundError:
+                versions[name] = "unavailable"
+        atomic_write_json(self.directory / "environment.json", {"python": sys.version, "platform": platform.platform(), "packages": versions})
+        self.profile = profile_task(self.task)
+        atomic_write_json(self.directory / "profile.json", self.profile)
+        self.split = prepare_split(self.task, self.directory)
+        atomic_write_json(self.directory / "split_manifest.json", self.split)
+        self._emergency_submission()
+        self.checkpoint()
+        try:
+            if not self.results and self.budget.research_remaining() > 0:
+                self.experiment("Reliable baseline before LLM research", baseline_code(self.task, n_jobs=self.config.n_jobs), is_baseline=True)
+            if not self.config.offline:
+                self.research()
+            best = select_best(self.results, self.task.maximize)
+            final_fit = self.finalize(best)
+        except KeyboardInterrupt:
+            self.stop_reason = "interrupted"
+            self.journal.append("run_interrupted")
+            self.checkpoint()
+            raise
+        except Exception as exc:
+            self.stop_reason = "orchestration_error"
+            self.journal.append("run_error", error=f"{type(exc).__name__}: {exc}")
+            best = select_best(self.results, self.task.maximize)
+            final_fit = {"status": "skipped", "reason": str(exc)}
+        validation = validate_submission(self.task, self.output)
+        llm_trials = sum(r.status == "ok" and not r.is_baseline for r in self.results)
+        status = "offline" if self.config.offline else ("completed" if llm_trials else "degraded")
+        report = {"status": status, "stop_reason": self.stop_reason, "task_type": self.task.task_type, "metric": self.task.metric,
+                  "best_metric": best.metric if best else None, "selected_trial": best.trial_id if best else None,
+                  "trials": [r.to_dict() for r in self.results], "llm_calls": self.steps, "llm_trials": llm_trials,
+                  "total_tokens": self.tokens_used, "elapsed_seconds": round(self.budget.elapsed(), 3),
+                  "submission_path": str(self.output), "run_dir": str(self.directory), "final_fit": final_fit, "validation": validation}
+        atomic_write_json(self.directory / "report.json", report)
+        rows = ["# AutoResearch run", "", f"Status: {status}; stop: {self.stop_reason}", f"Metric: {self.task.metric}; best validation: {report['best_metric']}",
+                f"Submission: {self.output}", "", "| Trial | Status | Validation metric | Seconds |", "|---|---|---:|---:|"]
+        rows += [f"| {r.trial_id} | {r.status} | {r.metric} | {r.seconds:.2f} |" for r in self.results]
+        rows += ["", "The validation metric belongs to the fixed holdout experiment. The final refit uses all training rows.",
+                 "Generated code runs in a supervised subprocess. Use the deployment container for OS-level filesystem/network isolation."]
+        (self.directory / "report.md").write_text("\n".join(rows) + "\n", encoding="utf-8")
+        self.journal.append("run_completed", report=report)
+        self.checkpoint(active=False)
+        return report
 
 def run(config):
-    return ResearchRun(config).execute()
+    # Lock before reading/repairing journal or recovering any in-flight calls.
+    if config.run_dir is None:
+        config.run_dir = config.task_path.parent / ".automl" / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "-" + uuid4().hex[:8])
+    with _run_lock(config.run_dir / "run.lock"):
+        return ResearchRun(config).execute()

@@ -1,0 +1,16 @@
+{
+  "phase": "red",
+  "command": [
+    ".venv/bin/python",
+    "-m",
+    "pytest",
+    "-q",
+    "tests/test_agent.py::test_concurrent_resume_cannot_settle_another_process_pending_call",
+    "--tb=short"
+  ],
+  "cwd": "/Users/egoraprelsky/Desktop/coding/alfa_hackathon",
+  "started_at_utc": "2026-10-19T19:21:37.649773+00:00",
+  "returncode": 1,
+  "output": "F                                                                        [100%]\n=================================== FAILURES ===================================\n______ test_concurrent_resume_cannot_settle_another_process_pending_call _______\ntests/test_agent.py:72: in test_concurrent_resume_cannot_settle_another_process_pending_call\n    assert (directory / \"events.jsonl\").read_bytes() == before\nE   assert b'{\"event\":\"r...708+00:00\"}\\n' == b'{\"event\":\"r...704+00:00\"}\\n'\nE     \nE     Use -v to get more diff\n----------------------------- Captured stderr call -----------------------------\ntrial_0001: ok, rmse=0.350326572312862\n=========================== short test summary info ============================\nFAILED tests/test_agent.py::test_concurrent_resume_cannot_settle_another_process_pending_call\n1 failed in 1.95s\n",
+  "seconds": 2.263
+}
