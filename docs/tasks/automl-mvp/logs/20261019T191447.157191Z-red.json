@@ -1,0 +1,16 @@
+{
+  "phase": "red",
+  "command": [
+    ".venv/bin/python",
+    "-m",
+    "pytest",
+    "-q",
+    "tests/test_agent.py",
+    "--tb=short"
+  ],
+  "cwd": "/Users/egoraprelsky/Desktop/coding/alfa_hackathon",
+  "started_at_utc": "2026-10-19T19:14:47.157191+00:00",
+  "returncode": 1,
+  "output": "FF                                                                       [100%]\n=================================== FAILURES ===================================\n______ test_best_selection_ignores_claimed_success_and_non_finite_scores _______\ntests/test_agent.py:18: in test_best_selection_ignores_claimed_success_and_non_finite_scores\n    assert select_best(candidates, True).trial_id == \"b\"\nautoml_agent/agent.py:4: in select_best\n    raise NotImplementedError(\"Independent model selection is not implemented yet\")\nE   NotImplementedError: Independent model selection is not implemented yet\n______________ test_offline_run_and_resume_preserve_valid_result _______________\ntests/test_agent.py:37: in test_offline_run_and_resume_preserve_valid_result\n    report = run(parse_config(args))\nautoml_agent/agent.py:8: in run\n    raise NotImplementedError(\"Research execution is not implemented yet\")\nE   NotImplementedError: Research execution is not implemented yet\n=========================== short test summary info ============================\nFAILED tests/test_agent.py::test_best_selection_ignores_claimed_success_and_non_finite_scores\nFAILED tests/test_agent.py::test_offline_run_and_resume_preserve_valid_result\n2 failed in 0.34s\n",
+  "seconds": 0.463
+}

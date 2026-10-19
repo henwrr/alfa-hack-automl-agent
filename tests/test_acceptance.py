@@ -140,7 +140,8 @@ def _jsonl_events(run_dir: Path) -> list[dict[str, Any]]:
     for path in paths:
         for line in path.read_text(encoding="utf-8").splitlines():
             if line.strip():
-                events.append(json.loads(line))
+                event = json.loads(line)
+                events.append({**event, **event.get("payload", {})})
     return events
 
 
@@ -178,6 +179,8 @@ def test_fake_openai_cli_recovers_from_bad_experiment_and_finishes(tmp_path: Pat
                 "--max-steps",
                 "6",
                 "--max-tokens",
+                "16000",
+                "--response-tokens",
                 "256",
                 "--llm-timeout",
                 "10",
