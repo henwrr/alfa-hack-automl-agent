@@ -60,6 +60,52 @@ def test_worker_evaluates_without_receiving_validation_labels_and_writes_ordered
     assert json.loads((artifact_dir / "worker_result.json").read_text())["status"] == "ok"
     assert (artifact_dir / "model.joblib").is_file()
 
+    load_script = (
+        "import json, joblib, pandas as pd, sys; "
+        "model = joblib.load(sys.argv[1]); "
+        "print(json.dumps(model.predict(pd.DataFrame({'amount': [10.0], 'kind': ['new']})).tolist()))"
+    )
+    loaded = subprocess.run(
+        [sys.executable, "-c", load_script, str(artifact_dir / "model.joblib")],
+        cwd=worktree, env=env, capture_output=True, text=True, timeout=30,
+    )
+    assert loaded.returncode == 0, loaded.stderr
+    assert len(json.loads(loaded.stdout)) == 1
+
+
+def test_worker_rejects_missing_feature_columns(tmp_path):
+    context = {
+        "task_type": "regression", "metric": "rmse", "target": "value",
+        "feature_columns": ["amount", "kind"], "categorical_columns": ["kind"],
+        "classes": [], "seed": 3, "n_jobs": 1,
+    }
+    train_x = pd.DataFrame({"amount": [1, 2, 3]})
+    train_y = pd.DataFrame({"value": [2, 4, 6]})
+    valid_x = pd.DataFrame({"amount": [4], "kind": ["a"]})
+    test_x = pd.DataFrame({"amount": [5], "kind": ["b"]})
+    inputs = {}
+    for name, frame in {"train_features": train_x, "train_target": train_y,
+                        "validation_features": valid_x, "test_features": test_x}.items():
+        path = tmp_path / f"{name}.csv"
+        frame.to_csv(path, index=False)
+        inputs[name] = str(path)
+    code_path = tmp_path / "candidate.py"
+    code_path.write_text("def build_model(context):\n    raise AssertionError('must reject schema first')\n", encoding="utf-8")
+    manifest = {"mode": "evaluate", "context": context, "inputs": inputs,
+                "code_path": str(code_path), "artifact_dir": str(tmp_path / "artifacts")}
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    worktree = Path(__file__).resolve().parents[1]
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(worktree) + os.pathsep + env.get("PYTHONPATH", "")
+    result = subprocess.run(
+        [sys.executable, "-m", "automl_agent.worker", "--manifest", str(manifest_path)],
+        cwd=worktree, env=env, capture_output=True, text=True, timeout=20,
+    )
+
+    assert result.returncode != 0
+    assert "missing feature columns" in result.stderr.lower()
+
 
 def test_worker_writes_probability_classes_for_classification(tmp_path):
     context = {

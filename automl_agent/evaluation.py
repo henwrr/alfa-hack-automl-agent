@@ -61,6 +61,17 @@ def _same_label(left: Any, right: Any) -> bool:
         return str(left) == str(right)
 
 
+def _positive_class(labels: list[Any]) -> Any:
+    """Use sklearn's conventional label 1, or the last ordered class."""
+    for label in labels:
+        if _same_label(label, 1):
+            return label
+    try:
+        return sorted(labels)[-1]
+    except TypeError:
+        return labels[-1]
+
+
 def _read_probability_artifacts(trial_dir: Path) -> tuple[np.ndarray, list[Any]] | None:
     probability_path = trial_dir / "valid_probabilities.npy"
     classes_path = trial_dir / "probability_classes.json"
@@ -109,6 +120,8 @@ def score_trial(task: TaskSpec, split: dict, trial_dir: Path) -> dict[str, float
         })
     elif task.task_type == "classification":
         labels = _classes(task, actual, predicted)
+        if primary == "f1" and len(labels) != 2:
+            raise ValueError("Метрика f1 поддерживается только для бинарной задачи; для нескольких классов используйте macro_f1")
         unknown_predictions = [
             value for value in pd.unique(predicted)
             if not any(_same_label(value, label) for label in labels)
@@ -120,7 +133,10 @@ def score_trial(task: TaskSpec, split: dict, trial_dir: Path) -> dict[str, float
             "weighted_f1": float(f1_score(actual, predicted, labels=labels, average="weighted", zero_division=0)),
             "accuracy": float(accuracy_score(actual, predicted)),
         })
-        scores["f1"] = scores["macro_f1"]
+        if len(labels) == 2:
+            scores["f1"] = float(f1_score(
+                actual, predicted, average="binary", pos_label=_positive_class(labels), zero_division=0
+            ))
         if primary in {"roc_auc", "log_loss"}:
             artifacts = _read_probability_artifacts(trial_dir)
             if artifacts is None:
@@ -165,7 +181,8 @@ def _expected_output_columns(task: TaskSpec) -> list[str]:
 
 
 def _read_test(task: TaskSpec) -> pd.DataFrame:
-    test = pd.read_csv(task.test_path, low_memory=False)
+    id_dtypes = {name: "string" for name in task.id_columns}
+    test = pd.read_csv(task.test_path, low_memory=False, dtype=id_dtypes)
     if not task.id_columns:
         return test
     missing = [name for name in task.id_columns if name not in test]
@@ -253,7 +270,8 @@ def publish_submission(task: TaskSpec, predictions_path: Path, destination: Path
     predictions_path = Path(predictions_path)
     if not predictions_path.is_file():
         raise ValueError(f"Не найден файл predictions: {predictions_path}")
-    predictions = pd.read_csv(predictions_path, low_memory=False)
+    id_dtypes = {name: "string" for name in task.id_columns}
+    predictions = pd.read_csv(predictions_path, low_memory=False, dtype=id_dtypes)
     expected_columns = _expected_output_columns(task)
     test = _read_test(task)
     if list(predictions.columns) == [task.target]:
@@ -277,5 +295,6 @@ def validate_submission(task: TaskSpec, path: Path) -> dict:
     path = Path(path)
     if not path.is_file():
         raise ValueError(f"Не найден submission: {path}")
-    frame = pd.read_csv(path, low_memory=False)
+    id_dtypes = {name: "string" for name in task.id_columns}
+    frame = pd.read_csv(path, low_memory=False, dtype=id_dtypes)
     return _validate_frame(task, frame, _read_test(task))

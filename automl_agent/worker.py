@@ -15,6 +15,7 @@ from typing import Any
 import joblib
 import numpy as np
 import pandas as pd
+import cloudpickle
 
 
 def _json_value(value: Any) -> Any:
@@ -55,6 +56,9 @@ def _atomic_json(value: dict, path: Path) -> None:
 
 def _load_features(path: str, columns: list[str], categorical: set[str]) -> pd.DataFrame:
     frame = pd.read_csv(path, low_memory=False)
+    missing = [name for name in columns if name not in frame.columns]
+    if missing:
+        raise ValueError(f"Missing feature columns in {path}: {missing}")
     frame = frame.reindex(columns=columns)
     for name in columns:
         if name in categorical:
@@ -76,6 +80,7 @@ def _load_model(code_path: Path):
     except Exception:
         sys.modules.pop(spec.name, None)
         raise
+    cloudpickle.register_pickle_by_value(module)
     builder = getattr(module, "build_model", None)
     if not callable(builder):
         raise TypeError("Код модели должен определять build_model(context: dict)")
@@ -175,7 +180,12 @@ def _run_manifest(manifest_path: Path) -> dict:
         fd, temporary = tempfile.mkstemp(prefix=".model.", suffix=".joblib", dir=artifact_dir)
         os.close(fd)
         try:
-            joblib.dump(model, temporary)
+            # cloudpickle embeds dynamically loaded candidate classes/functions;
+            # the resulting pickle remains readable through joblib.load().
+            with open(temporary, "wb") as stream:
+                cloudpickle.dump(model, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
             os.replace(temporary, model_path)
         finally:
             if os.path.exists(temporary):

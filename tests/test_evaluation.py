@@ -91,3 +91,54 @@ def test_probability_metrics_use_host_artifacts_and_validation_labels(tmp_path):
 
     metrics = score_trial(task, {"validation_target": str(split / "validation_target.csv")}, trial)
     assert metrics["log_loss"] == pytest.approx(-np.log([0.9, 0.8, 0.4]).mean())
+
+
+def test_binary_f1_uses_positive_class_not_macro_average(tmp_path):
+    task = make_task(tmp_path, "classification")
+    task.metric = "f1"
+    split = tmp_path / "split"
+    trial = tmp_path / "trial"
+    split.mkdir()
+    trial.mkdir()
+    pd.DataFrame({"label": ["b", "a", "a", "a", "a", "a"]}).to_csv(
+        split / "validation_target.csv", index=False
+    )
+    pd.DataFrame({"label": ["a"] * 6}).to_csv(trial / "valid_predictions.csv", index=False)
+
+    metrics = score_trial(task, {"validation_target": str(split / "validation_target.csv")}, trial)
+
+    assert metrics["f1"] == pytest.approx(0.0)
+    assert metrics["macro_f1"] == pytest.approx(5 / 11)
+
+
+def test_f1_metric_rejects_multiclass_instead_of_silently_using_macro(tmp_path):
+    task = make_task(tmp_path, "classification")
+    task.metric = "f1"
+    task.classes = ["a", "b", "c"]
+    split = tmp_path / "split"
+    trial = tmp_path / "trial"
+    split.mkdir()
+    trial.mkdir()
+    pd.DataFrame({"label": ["a", "b", "c"]}).to_csv(split / "validation_target.csv", index=False)
+    pd.DataFrame({"label": ["a", "b", "c"]}).to_csv(trial / "valid_predictions.csv", index=False)
+
+    with pytest.raises(ValueError, match="бинарной задачи"):
+        score_trial(task, {"validation_target": str(split / "validation_target.csv")}, trial)
+
+
+def test_publish_and_validate_preserve_zero_padded_ids(tmp_path):
+    task = make_task(tmp_path)
+    pd.DataFrame({"key": ["001", "010", "020"], "x": [4, 5, 6]}).to_csv(
+        task.test_path, index=False
+    )
+    pd.DataFrame({"key": ["001", "010", "020"], "label": [0, 0, 0]}).to_csv(
+        task.sample_path, index=False
+    )
+    predictions = tmp_path / "predictions.csv"
+    pd.DataFrame({"label": [5.0, 6.0, 7.0]}).to_csv(predictions, index=False)
+    destination = tmp_path / "submission.csv"
+
+    publish_submission(task, predictions, destination)
+
+    assert pd.read_csv(destination, dtype={"key": "string"})["key"].tolist() == ["001", "010", "020"]
+    assert validate_submission(task, destination)["valid"] is True

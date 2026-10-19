@@ -43,3 +43,33 @@ exit_code=0
 Многоклассовая классификация classification macro_f1 attack_cat 42 ['id'] ['proto', 'service', 'state'] ['id', 'attack_cat']
 exit_code=0
 ```
+
+## Red по замечаниям review
+
+После добавления четырёх регрессионных сценариев, до исправления кода, та же команда завершилась так:
+
+```text
+...FF......FF                                                            [100%]
+4 failed, 9 passed in 2.18s
+exit_code=1
+```
+
+Падения подтвердили дефекты поведения: новый процесс не загружал `model.joblib` (`ModuleNotFoundError` для динамического `automl_candidate_<pid>`); `f1` на бинарном примере совпадал с macro F1 вместо F1 положительного класса; публикация превращала ID `001` в `1`; worker принимал train feature CSV без обязательной колонки `kind`.
+
+## Green после исправлений review
+
+Команда:
+
+```text
+/Users/egoraprelsky/Desktop/coding/alfa_hackathon/.venv/bin/python -m pytest -q tests/test_data.py tests/test_worker.py tests/test_evaluation.py
+```
+
+Фактический вывод:
+
+```text
+.............                                                            [100%]
+14 passed in 2.37s
+exit_code=0
+```
+
+Регрессионный тест загружает `model.joblib` через `joblib.load` в новом Python-процессе и проверяет `predict`; бинарный F1 тест различает `f1=0` положительного класса и `macro_f1=5/11`. Для многоклассового `f1` evaluator теперь сообщает, что метрика поддержана только для бинарной задачи, и предлагает `macro_f1`.
