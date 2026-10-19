@@ -41,6 +41,16 @@ def _read_json(path, default=None):
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else default
 
 
+def request_token_bound(messages, tools):
+    """Conservative byte-based admission without assuming a model tokenizer.
+
+    Byte-fallback tokenizers cannot need more pieces than the UTF-8 bytes.
+    Reserve additional framing space for the provider's chat template.
+    """
+    content = json.dumps({"messages": messages, "tools": tools}, ensure_ascii=False)
+    return len(content.encode("utf-8")) + 1024 + 64 * len(messages)
+
+
 class ResearchRun:
     def __init__(self, config):
         initialized_at = time.monotonic()
@@ -89,14 +99,45 @@ class ResearchRun:
         self.recent_steps = []
         self.split = None
         self.profile = None
+        self.dispatched = {e.get("call_id") for e in events if e.get("event") == "tool_call"}
+        self.tool_results = {e.get("call_id"): e.get("result") for e in events if e.get("event") == "tool_result"}
         self._recover_calls(events)
+        self._recover_model_state(events)
+
+    def _recover_model_state(self, events):
+        from .contracts import ModelResponse
+
+        requests = {e["request_id"]: e for e in events if e.get("event") == "llm_request"}
+        responses = {e["request_id"]: e for e in events if e.get("event") == "llm_response"}
+        errors = {e["request_id"]: e for e in events if e.get("event") == "llm_error"}
+        consumed = {e.get("request_id") for e in events if e.get("event") in {"llm_response_consumed", "llm_protocol_error"}}
+        tokens = 0
+        for request_id, request in requests.items():
+            bound = request.get("input_token_bound") or request_token_bound(request.get("messages", []), request.get("tools", []))
+            if request_id in responses:
+                payload = responses[request_id]["response"]
+                tokens += responses[request_id].get("charged_tokens") or payload.get("total_tokens") or payload.get("prompt_tokens", 0) + payload.get("completion_tokens", 0) or bound
+            elif request_id in errors:
+                tokens += errors[request_id].get("charged_tokens", bound)
+            else:
+                charged = bound + request.get("max_tokens", 0)
+                tokens += charged
+                self.journal.append("llm_error", request_id=request_id, code="interrupted", error="Outcome unknown after process interruption; request not replayed", charged_tokens=charged)
+        self.tokens_used = max(self.tokens_used, tokens)
+        self.steps = max(self.steps, len(requests))
+        self.pending_responses = [(request_id, ModelResponse(**event["response"])) for request_id, event in responses.items() if request_id not in consumed]
+        for event in events:
+            if event.get("event") == "tool_result" and event.get("name") == "finish_research" and event.get("result", {}).get("value", {}).get("finished"):
+                self.finish_requested = True
+                self.stop_reason = "model_finished"
 
     def _recover_calls(self, events):
         settled = {e.get("call_id") for e in events if e.get("event") == "tool_result"}
         for event in events:
             if event.get("event") == "tool_call" and event.get("call_id") not in settled:
-                self.journal.append("tool_result", call_id=event.get("call_id"), name=event.get("name"),
-                                    result={"ok": False, "error": {"code": "INTERRUPTED", "message": "Previous process ended before a durable result; not replayed"}})
+                result = {"ok": False, "error": {"code": "INTERRUPTED", "message": "Previous process ended before a durable result; not replayed"}}
+                self.journal.append("tool_result", call_id=event.get("call_id"), name=event.get("name"), result=result)
+                self.tool_results[event.get("call_id")] = result
         finished = {r.trial_id for r in self.results}
         for event in events:
             if event.get("event") == "trial_started" and event.get("trial_id") not in finished:
@@ -129,6 +170,68 @@ class ResearchRun:
         if not self.config.resume or not self.output.exists():
             publish_submission(self.task, path, self.output)
             self.journal.append("fallback_written", submission_path=str(self.output), strategy="mode" if self.task.task_type == "classification" else "mean")
+
+    def _restore_best_submission(self):
+        from .evaluation import publish_submission
+
+        while (best := select_best(self.results, self.task.maximize)) is not None:
+            try:
+                source = Path(best.artifact_dir) / "code.py"
+                if hashlib.sha256(source.read_bytes()).hexdigest() != best.code_hash:
+                    raise ValueError("Candidate source checksum changed")
+                publish_submission(self.task, Path(best.prediction_path), self.output)
+                self.journal.append("candidate_restored", trial_id=best.trial_id, metric=best.metric, submission_path=str(self.output))
+                return
+            except (OSError, ValueError, TypeError) as exc:
+                best.status = "invalid_artifact"
+                best.error = str(exc)
+                self.journal.append("trial_completed", result=best.to_dict())
+
+    def _dispatch_response(self, request_id, response, registry):
+        from .tools import parse_response_calls
+
+        try:
+            calls = parse_response_calls(response.message)
+        except ValueError as exc:
+            self.feedback = str(exc)
+            self.journal.append("llm_protocol_error", request_id=request_id, error=str(exc))
+            self.journal.append("llm_response_consumed", request_id=request_id)
+            self.checkpoint()
+            return
+        for index, call in enumerate(calls):
+            original = call["id"]
+            call["id"] = original if original in self.dispatched else f"{request_id}_tool_{index}"
+        step_messages = [{"role": "assistant", "content": response.message.get("content") or "", "tool_calls": calls}]
+        history_safe = True
+        for call in calls:
+            function = call["function"]
+            try:
+                logged_arguments = json.loads(function["arguments"])
+                if not isinstance(logged_arguments, dict):
+                    history_safe = False
+            except ValueError:
+                logged_arguments = function["arguments"]
+                history_safe = False
+            if call["id"] in self.dispatched:
+                result = self.tool_results.get(call["id"], {"ok": False, "error": {"code": "INTERRUPTED", "message": "Not replayed"}})
+            else:
+                self.journal.append("tool_call", call_id=call["id"], name=function["name"], arguments=logged_arguments)
+                self.dispatched.add(call["id"])
+                self.checkpoint()
+                if self.finish_requested or self.tokens_used >= self.config.max_tokens:
+                    code = "TOKEN_BUDGET" if self.tokens_used >= self.config.max_tokens else "CANCELLED"
+                    result = {"ok": False, "error": {"code": code, "message": "Research has stopped; tool was not executed"}}
+                else:
+                    result = registry.execute(function["name"], function["arguments"])
+                self.journal.append("tool_result", call_id=call["id"], name=function["name"], result=result)
+                self.tool_results[call["id"]] = result
+            self.feedback = json.dumps(result, ensure_ascii=False, default=str)
+            step_messages.append({"role": "tool", "tool_call_id": call["id"], "name": function["name"], "content": self.feedback})
+            self.checkpoint()
+        if history_safe:
+            self.recent_steps.append(step_messages)
+        self.journal.append("llm_response_consumed", request_id=request_id)
+        self.checkpoint()
 
     def _next_trial_id(self):
         indices = [int(p.name.split("_")[1]) for p in self.directory.glob("trial_*") if p.is_dir() and p.name.split("_")[1].isdigit()]
@@ -214,7 +317,7 @@ class ResearchRun:
     def research(self):
         from .prompts import build_messages
         from .providers import OllamaProvider, OpenAICompatibleProvider, ProviderError
-        from .tools import ToolRegistry, parse_response_calls
+        from .tools import ToolRegistry
 
         provider_type = OllamaProvider if self.config.provider == "ollama" else OpenAICompatibleProvider
         provider = provider_type(base_url=self.config.base_url, api_key=self.config.api_key, model=self.config.model, extra_body=self.config.extra_body)
@@ -223,8 +326,14 @@ class ResearchRun:
                           {"type": "object", "properties": {"hypothesis": {"type": "string", "minLength": 1, "maxLength": 6000}, "code": {"type": "string", "minLength": 1, "maxLength": 64000}}, "required": ["hypothesis", "code"], "additionalProperties": False}, self._llm_experiment)
         registry.register("finish_research", "Stop research after a successful generated candidate; host refits the best model.",
                           {"type": "object", "properties": {"reason": {"type": "string", "minLength": 1, "maxLength": 4000}}, "required": ["reason"], "additionalProperties": False}, self._finish)
+        for request_id, response in self.pending_responses:
+            self.journal.append("llm_response_recovered", request_id=request_id)
+            self._dispatch_response(request_id, response, registry)
         compact = False
         while len(self.results) < self.config.max_trials and self.steps < self.config.max_steps and not self.finish_requested:
+            if self.tokens_used >= self.config.max_tokens:
+                self.stop_reason = "token_budget"
+                break
             if self.budget.research_remaining() <= 1:
                 self.stop_reason = "time_budget"
                 break
@@ -237,23 +346,29 @@ class ResearchRun:
             # available through the structured ledger and the durable journal.
             for step_messages in self.recent_steps[-(1 if compact else 2):]:
                 messages.extend(step_messages)
-            estimate = max(1, len(json.dumps(messages, ensure_ascii=False)) // 3)
+            estimate = request_token_bound(messages, registry.schemas())
             available_tokens = self.config.max_tokens - self.tokens_used - estimate
             if available_tokens < 128:
+                if not compact:
+                    compact = True
+                    self.recent_steps.clear()
+                    self.journal.append("context_compacted", reason="token_budget_admission")
+                    continue
                 self.stop_reason = "token_budget"
                 break
             output_cap = min(self.config.response_tokens, available_tokens)
             self.steps += 1
             request_id = f"request_{self.steps:04d}"
             self.journal.append("llm_request", request_id=request_id, provider=self.config.provider, model=self.config.model,
-                                messages=messages, tools=registry.schemas(), max_tokens=output_cap)
+                                messages=messages, tools=registry.schemas(), max_tokens=output_cap, input_token_bound=estimate)
             self.checkpoint()
             try:
                 response = provider.complete(messages, registry.schemas(), timeout=min(self.config.llm_timeout, self.budget.research_remaining()), max_tokens=output_cap)
             except ProviderError as exc:
                 # Failed requests may still be billable; reserve their estimated input.
-                self.tokens_used += estimate
-                self.journal.append("llm_error", request_id=request_id, code=exc.code, error=str(exc))
+                charged = estimate + output_cap
+                self.tokens_used += charged
+                self.journal.append("llm_error", request_id=request_id, code=exc.code, error=str(exc), charged_tokens=charged)
                 if exc.code in {"context_overflow", "CONTEXT_WINDOW_EXCEEDED", "context_length_exceeded"} and not compact:
                     compact = True
                     self.recent_steps.clear()
@@ -262,36 +377,10 @@ class ResearchRun:
                     continue
                 self.stop_reason = "provider_error"
                 break
-            self.tokens_used += response.total_tokens or response.prompt_tokens + response.completion_tokens or estimate + len(json.dumps(response.message)) // 3
-            self.journal.append("llm_response", request_id=request_id, response=response.to_dict())
-            try:
-                calls = parse_response_calls(response.message)
-            except ValueError as exc:
-                self.feedback = str(exc)
-                self.journal.append("llm_protocol_error", request_id=request_id, error=str(exc))
-                self.checkpoint()
-                continue
-            step_messages = [{"role": "assistant", "content": response.message.get("content") or "", "tool_calls": calls}]
-            history_safe = True
-            for call in calls:
-                function = call["function"]
-                try:
-                    logged_arguments = json.loads(function["arguments"])
-                except ValueError:
-                    logged_arguments = function["arguments"]
-                    history_safe = False
-                self.journal.append("tool_call", call_id=call["id"], name=function["name"], arguments=logged_arguments)
-                self.checkpoint()
-                if self.finish_requested:
-                    result = {"ok": False, "error": {"code": "CANCELLED", "message": "Research already finished earlier in this step"}}
-                else:
-                    result = registry.execute(function["name"], function["arguments"])
-                self.journal.append("tool_result", call_id=call["id"], name=function["name"], result=result)
-                self.feedback = json.dumps(result, ensure_ascii=False, default=str)
-                step_messages.append({"role": "tool", "tool_call_id": call["id"], "name": function["name"], "content": self.feedback})
-                self.checkpoint()
-            if history_safe:
-                self.recent_steps.append(step_messages)
+            charged = response.total_tokens or response.prompt_tokens + response.completion_tokens or estimate + len(json.dumps(response.message).encode("utf-8"))
+            self.tokens_used += charged
+            self.journal.append("llm_response", request_id=request_id, response=response.to_dict(), charged_tokens=charged)
+            self._dispatch_response(request_id, response, registry)
         if self.steps >= self.config.max_steps and not self.finish_requested:
             self.stop_reason = "max_steps"
         if len(self.results) >= self.config.max_trials:
@@ -328,6 +417,8 @@ class ResearchRun:
         else:
             outcome["error"] = (process.stderr or process.stdout)[-3000:]
         self.journal.append("final_fit_completed", result=outcome)
+        if process.status == "cancelled":
+            raise KeyboardInterrupt
         return outcome
 
     def execute(self):
@@ -343,17 +434,20 @@ class ResearchRun:
         atomic_write_json(self.directory / "config.json", self.config.public_dict())
         atomic_write_json(self.directory / "task.json", self.task.to_dict())
         versions = {}
-        for name in ("numpy", "pandas", "scikit-learn", "catboost", "httpx", "psutil", "cloudpickle"):
+        for name in ("numpy", "pandas", "scikit-learn", "catboost", "lightgbm", "xgboost", "optuna", "torch", "autogluon.tabular", "flaml", "lightautoml", "httpx", "psutil", "cloudpickle"):
             try:
                 versions[name] = importlib.metadata.version(name)
             except importlib.metadata.PackageNotFoundError:
                 versions[name] = "unavailable"
         atomic_write_json(self.directory / "environment.json", {"python": sys.version, "platform": platform.platform(), "packages": versions})
         self.profile = profile_task(self.task)
+        self.profile["available_packages"] = versions
         atomic_write_json(self.directory / "profile.json", self.profile)
         self.split = prepare_split(self.task, self.directory)
         atomic_write_json(self.directory / "split_manifest.json", self.split)
         self._emergency_submission()
+        if self.config.resume:
+            self._restore_best_submission()
         self.checkpoint()
         try:
             if not self.results and self.budget.research_remaining() > 0:

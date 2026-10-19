@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import json
+import signal
 import sys
 
 from automl_agent.config import parse_config
 
 
 def main(argv=None):
+    def terminate(_signum, _frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, terminate)
     config = parse_config(argv)
     try:
         from automl_agent.agent import run

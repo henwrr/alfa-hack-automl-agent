@@ -1,4 +1,5 @@
 import json
+import time
 
 import numpy as np
 import pandas as pd
@@ -70,3 +71,101 @@ def test_concurrent_resume_cannot_settle_another_process_pending_call(tmp_path):
         with pytest.raises(ValueError, match="Another process"):
             run(parse_config([*args, "--resume"]))
     assert (directory / "events.jsonl").read_bytes() == before
+
+
+def test_hung_generated_fit_is_killed_and_preserves_submission(tmp_path, monkeypatch):
+    from automl_agent.contracts import ModelResponse
+    from automl_agent.providers import OpenAICompatibleProvider
+
+    task = make_task(tmp_path / "dataset")
+    code = """from sklearn.base import BaseEstimator
+class HungEstimator(BaseEstimator):
+    def fit(self, X, y):
+        while True:
+            pass
+    def predict(self, X):
+        return [0.0] * len(X)
+def build_model(context):
+    return HungEstimator()
+"""
+    def complete(*args, **kwargs):
+        return ModelResponse({"role": "assistant", "tool_calls": [{"id": "hang", "type": "function", "function": {
+            "name": "run_experiment", "arguments": json.dumps({"hypothesis": "simulate a hung fit", "code": code})}}]}, total_tokens=20)
+    monkeypatch.setattr(OpenAICompatibleProvider, "complete", complete)
+    monkeypatch.setenv("OPENAI_MODEL", "fake")
+    monkeypatch.setenv("AUTOML_PROVIDER", "openai")
+    config = parse_config([str(task), "--run-dir", str(tmp_path / "run"), "--time-budget", "30", "--trial-timeout", "0.75", "--max-trials", "2", "--n-jobs", "1"])
+    report = run(config)
+    assert report["trials"][-1]["status"] == "timeout"
+    assert report["elapsed_seconds"] < 15
+    output = pd.read_csv(task.parent / "submission.csv")
+    assert len(output) == 10 and np.isfinite(output.outcome).all()
+    assert report["status"] == "degraded"
+
+
+def test_resume_uses_durable_response_and_usage_without_another_api_call(tmp_path, monkeypatch):
+    from automl_agent.contracts import ModelResponse
+    from automl_agent.journal import EventJournal, atomic_write_json
+    from automl_agent.providers import OpenAICompatibleProvider
+
+    task = make_task(tmp_path / "dataset")
+    directory = tmp_path / "run"
+    args = [str(task), "--run-dir", str(directory), "--time-budget", "90", "--max-trials", "2", "--n-jobs", "1"]
+    run(parse_config([*args, "--offline"]))
+    state = json.loads((directory / "state.json").read_text())
+    state.update(active=True, total_tokens=0, llm_calls=0, checkpoint_epoch=time.time())
+    atomic_write_json(directory / "state.json", state)
+    journal = EventJournal(directory / "events.jsonl")
+    code = "from sklearn.dummy import DummyRegressor\ndef build_model(context):\n    return DummyRegressor()\n"
+    response = ModelResponse({"role": "assistant", "tool_calls": [{"id": "paid-call", "type": "function", "function": {
+        "name": "run_experiment", "arguments": json.dumps({"hypothesis": "durable paid hypothesis", "code": code})}}]}, total_tokens=42)
+    journal.append("llm_request", request_id="request_0001", messages=[], tools=[], max_tokens=256, input_token_bound=100)
+    journal.append("llm_response", request_id="request_0001", response=response.to_dict())
+    monkeypatch.setenv("OPENAI_MODEL", "fake")
+    monkeypatch.setenv("AUTOML_PROVIDER", "openai")
+    calls = []
+    def forbidden_call(*args, **kwargs):
+        calls.append(True)
+        raise AssertionError("the response was already paid for and persisted")
+    monkeypatch.setattr(OpenAICompatibleProvider, "complete", forbidden_call)
+    report = run(parse_config([*args, "--resume"]))
+    assert not calls
+    assert report["total_tokens"] >= 42
+    assert report["llm_calls"] == 1
+    assert any(t["hypothesis"] == "durable paid hypothesis" and t["status"] == "ok" for t in report["trials"])
+
+
+def test_resume_restores_best_predictions_when_refit_budget_is_exhausted(tmp_path):
+    from automl_agent.data import discover_task
+    from automl_agent.evaluation import publish_submission
+    from automl_agent.journal import atomic_write_json
+
+    task = make_task(tmp_path / "dataset")
+    directory = tmp_path / "run"
+    args = [str(task), "--offline", "--run-dir", str(directory), "--time-budget", "90", "--n-jobs", "1"]
+    first = run(parse_config(args))
+    candidate = next(t for t in first["trials"] if t["trial_id"] == first["selected_trial"])
+    expected = pd.read_csv(candidate["prediction_path"])["outcome"]
+    publish_submission(discover_task(task), directory / "fallback_predictions.csv", task.parent / "submission.csv")
+    state = json.loads((directory / "state.json").read_text())
+    state.update(active=True, elapsed_seconds=90, checkpoint_epoch=time.time())
+    atomic_write_json(directory / "state.json", state)
+    resumed = run(parse_config([*args, "--resume"]))
+    assert resumed["final_fit"]["status"] == "skipped"
+    assert np.allclose(pd.read_csv(task.parent / "submission.csv")["outcome"], expected)
+
+
+def test_usage_above_budget_prevents_dispatch_of_the_returned_tool(tmp_path, monkeypatch):
+    from automl_agent.contracts import ModelResponse
+    from automl_agent.providers import OpenAICompatibleProvider
+
+    task = make_task(tmp_path / "dataset")
+    monkeypatch.setenv("OPENAI_MODEL", "fake")
+    monkeypatch.setenv("AUTOML_PROVIDER", "openai")
+    def complete(*args, **kwargs):
+        return ModelResponse({"role": "assistant", "tool_calls": [{"id": "over-budget", "type": "function", "function": {
+            "name": "run_experiment", "arguments": json.dumps({"hypothesis": "must not execute", "code": "from sklearn.dummy import DummyRegressor\ndef build_model(context):\n return DummyRegressor()"})}}]}, total_tokens=100000)
+    monkeypatch.setattr(OpenAICompatibleProvider, "complete", complete)
+    report = run(parse_config([str(task), "--run-dir", str(tmp_path / "run"), "--time-budget", "90", "--max-trials", "2", "--max-tokens", "30000", "--n-jobs", "1"]))
+    assert report["stop_reason"] == "token_budget"
+    assert not any(t["hypothesis"] == "must not execute" for t in report["trials"])
