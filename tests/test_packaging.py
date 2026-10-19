@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import zipfile
+import json
 from pathlib import Path
 
 
@@ -87,3 +88,24 @@ def test_packager_fails_clearly_when_solution_entrypoint_is_missing(tmp_path: Pa
     assert completed.returncode != 0
     assert "solution.py" in (completed.stdout + completed.stderr)
     assert not (tmp_path / "out.zip").exists()
+
+
+def test_actual_archive_solves_a_task_from_an_unrelated_working_directory(tmp_path):
+    output = tmp_path / "runtime.zip"
+    subprocess.run([sys.executable, str(PACKAGER), "--output", str(output)], check=True, capture_output=True)
+    source = tmp_path / "unpacked"
+    with zipfile.ZipFile(output) as archive:
+        archive.extractall(source)
+    task_dir = tmp_path / "данные с пробелом"
+    task_dir.mkdir()
+    (task_dir / "train.csv").write_text("record,x,target\n" + "".join(f"{i},{i},{i * 2}\n" for i in range(30)))
+    (task_dir / "test.csv").write_text("record,x\n91,4\n92,8\n")
+    (task_dir / "sample_submission.csv").write_text("record,target\n91,0\n92,0\n")
+    task = task_dir / "task.md"
+    task.write_text("Regression; target=target; metric RMSE. train.csv test.csv sample_submission.csv")
+    result = subprocess.run([sys.executable, str(source / "solution.py"), str(task), "--offline", "--time-budget", "30", "--n-jobs", "1", "--run-dir", str(tmp_path / "artifacts")],
+                            cwd=tmp_path, capture_output=True, text=True, timeout=45)
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["status"] == "offline" and report["best_metric"] is not None
+    assert (task_dir / "submission.csv").read_text().splitlines()[0] == "record,target"
