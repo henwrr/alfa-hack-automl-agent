@@ -1,0 +1,68 @@
+{
+  "feature_commit": "b98827d",
+  "date": "2026-10-19",
+  "tests": {
+    "baseline": 65,
+    "final": 90,
+    "final_seconds": 26.39,
+    "exit_code": 0,
+    "command": ".venv/bin/python -m pytest -q --tb=short"
+  },
+  "live": {
+    "provider": "ollama",
+    "model": "qwen3.5:9b",
+    "run_dir": "/Users/egoraprelsky/Desktop/coding/alfa_hackathon/runs/decision-audit-live/verified-research",
+    "status": "completed",
+    "baseline_macro_f1": 0.8362457527217252,
+    "best_macro_f1": 0.8674074074074074,
+    "selected_trial": "trial_0002",
+    "successful_generated_trials": 1,
+    "llm_calls": 4,
+    "tokens": 28153,
+    "seconds": 232.971,
+    "final_fit": "ok",
+    "submission": {
+      "columns": [
+        "record_id",
+        "segment"
+      ],
+      "rows": 30,
+      "target": "segment",
+      "valid": true
+    },
+    "command": "AUTOML_PROVIDER=ollama OPENAI_MODEL=qwen3.5:9b OPENAI_BASE_URL=http://127.0.0.1:11434 OPENAI_API_KEY='' .venv/bin/python solution.py runs/decision-audit-live/data/task.md --run-dir runs/decision-audit-live/verified-research --time-budget 300 --trial-timeout 30 --llm-timeout 130 --max-trials 4 --max-steps 4 --max-tokens 120000 --response-tokens 4096 --n-jobs 1"
+  },
+  "resume_and_model_reload": {
+    "resume_without_new_events": true,
+    "projection_rebuilt": true,
+    "canonical_events": 40,
+    "model_reload_predict_rows": 30,
+    "status": "completed",
+    "baseline_macro_f1": 0.8362457527217252,
+    "best_macro_f1": 0.8674074074074074,
+    "selected_trial": "trial_0002",
+    "generated_successes": 1,
+    "llm_calls": 4,
+    "seconds": 232.971
+  },
+  "archive": {
+    "path": "/Users/egoraprelsky/Desktop/coding/alfa_hackathon/dist/solution.zip",
+    "files": 19,
+    "bytes": 62534,
+    "sha256": "d078f1f8b4f079fcc1b7d8f1a93255cb82d908d6b32b752e5fcbc0232b438f7a"
+  },
+  "limits": [
+    "Synthetic validation score is one fixed holdout, not a platform hidden-test score.",
+    "Earlier live run limited to one generated attempt was degraded after an LLM code error; the baseline submission remained valid.",
+    "LLM explanations are public summaries, not provider private reasoning; explanations may contain incorrect claims, which host facts and measured metrics do not endorse.",
+    "The official API and Docker remain untested.",
+    "No automatic warm-up race or multi-agent runtime was implemented; shortlist is a data-aware recommendation.",
+    "Finalization reserve remains min(600 seconds,max(1 second,15% total_budget))."
+  ],
+  "live_code_commit": "82fe1cc",
+  "post_review_checks": [
+    "90 tests passed on integrated fixes",
+    "4 independent regression tests passed, no open P1/P2 from review",
+    "Completed-run resume, projection rebuild and model reload/predict passed"
+  ]
+}

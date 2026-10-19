@@ -5,8 +5,8 @@
 | Спецификация и baseline | — | docs/tasks/decision-journal | root | pytest baseline | выполнено |
 | Проекции журнала и live вывод | спецификация | automl_agent/audit.py, tests/test_audit.py | Luna xhigh / decision-audit | red → green, секреты, resume | интегрировано 1aab4da |
 | Метаданные реальной модели | спецификация | automl_agent/worker.py, tests/test_model_metadata.py | Luna xhigh / decision-model-metadata | red → green, wrapper/pipeline | интегрировано 361c694; уточнения root |
-| Стратегия и объяснения LLM | спецификация | strategy.py, agent.py, contracts.py, prompts.py, tests/test_decisions.py | root | red → green интеграция | реализовано, финальные проверки |
-| Интеграция и документация | все компоненты | README.md, docs/RESEARCH_STRATEGY.md, task docs | root | полный suite, Ollama, ZIP | запланировано |
+| Стратегия и объяснения LLM | спецификация | strategy.py, agent.py, contracts.py, prompts.py, tests/test_decisions.py | root | red → green интеграция | выполнено |
+| Интеграция и документация | все компоненты | README.md, docs/RESEARCH_STRATEGY.md, task docs | root | полный suite, Ollama, ZIP | выполнено |
 
 ## Базовый коммит
 f5feddc. Baseline: 65 passed, 17.63s (exit 0).
@@ -18,3 +18,6 @@ Decision schema: model_family(str), observations(list[str]), rationale(str), alt
 
 ## Интеграция
 Исполнители коммитят только свои файлы в отдельных worktree; root проверяет diff и переносит коммиты. Общие проверки запускаются после сведения.
+
+## Дополнения по ревью
+EventJournal.redact применяется и к результатам/snapshots/отчётам. Планирование использует TaskSpec.maximize. Пропущенные host-assessments восстанавливаются из trial_completed с recovered=true и completion_seq без повторения платного запроса или обучения. Runtime-мультиагентность и новые квоты scheduler не вводились.

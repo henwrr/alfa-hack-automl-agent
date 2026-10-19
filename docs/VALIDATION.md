@@ -4,11 +4,17 @@
 
 ## Автоматические проверки
 
-Команда `.venv/bin/python -m pytest -q --tb=short`: **65 passed in 19.38s**, exit 0. [Протокол](tasks/automl-mvp/logs/20261019T193139.575627Z-verify.json).
+Первая версия MVP: `.venv/bin/python -m pytest -q --tb=short` — **65 passed in 19.38s**, exit 0. [Протокол](tasks/automl-mvp/logs/20261019T193139.575627Z-verify.json).
 
 Проверены discovery новых схем, выбор основной метрики, фиксированный split, категории/пропуски, независимые метрики, ID с ведущими нулями, некорректные CSV и загрузка модели в новом процессе. Runtime-тесты проверяют timeout и потомков, output/RSS caps, очищенное окружение, API retries и Ollama tool history. Recovery-тесты проверяют JSONL, redaction, fingerprint, concurrent resume, восстановление usage и сохранённого ответа без повторного HTTP-запроса, публикацию победителя при исчерпанном refit budget.
 
 Acceptance с локальным OpenAI-compatible HTTP server воспроизводит ошибочный код, tool error, исправление и finish. Реальный ZIP распаковывается и решает синтетическую задачу с другой cwd и кириллицей/пробелами в пути. Unit suite не требует Ollama или API-ключа.
+
+## Дополнение: журнал решений
+
+После добавления audit: **90 passed in 26.39s**, exit 0. Независимое review и перепроверка исправлений завершены без открытых P1/P2. Проверены публичные объяснения до обучения, actual estimator/fallback, метрики выбора, secrets в snapshots/старых отчётах, восстановление пропущенного assessment и audit-проекций. Протоколы в [задаче decision-journal](tasks/decision-journal/TESTS.md).
+
+Новый live Ollama-run: 360 строк train, 30 test, 4 вызова LLM, 1 успешный generated trial, Macro F1 **0.83624575 → 0.86740741**, 232.971s; выбран CatBoost trial_0002. Финальный refit и CSV валидны; модель повторно загружена и предсказывает 30 строк. Повреждённый agent.log восстановлен через --resume; 40 событий остались неизменны, нового обучения/LLM не было. Машинные результаты: [decision-journal-2026-10-19.json](validation/decision-journal-2026-10-19.json).
 
 ## Реальные прогоны через Ollama
 
