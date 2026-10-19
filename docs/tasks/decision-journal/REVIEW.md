@@ -1,31 +1,26 @@
 # Независимое ревью decision journal
 
-Проверен diff `f5feddc..82fe1cc` в изолированном worktree. Изменения кода не вносились. Полный suite, по отчёту интеграции, проходит: 86 passed.
+Первичный review diff `f5feddc..82fe1cc` выполнен в отдельном worktree. Повторно проверен фиксирующий commit `edba428224183ff5c066e1eb2ee61aa584fc4bf4`; изменения кода не вносились.
 
-## Findings
+## Исправленные findings
 
-### [P1] API key попадает в snapshots и отчёты через гипотезу LLM
+- **API key через гипотезу LLM — исправлено.** `experiment` теперь берёт гипотезу из redacted события, redacts `ExperimentResult` перед записью результата, snapshots и отчёта; `checkpoint`, `process.json`, `report.json` и `report.md` также используют политику `EventJournal.redact`. Добавленный тест проверяет отсутствие ключа в `events.jsonl`, audit-проекциях, state, experiments и обоих отчётах. Ранее это было воспроизведено fake provider.
+- **Направление `weighted_f1` — исправлено.** `plan_research` берёт направление из `TaskSpec.maximize`, согласованного с host evaluator.
+- **Потерянная оценка после сбоя — исправлено.** `_recover_assessments` восстанавливает отсутствующий host assessment из сохранённых событий в порядке завершения, добавляет `recovered` и `completion_seq`, не запускает обучение или LLM. Regression test удаляет assessment, запрещает повторный `experiment`, возобновляет run и проверяет однократное восстановление.
 
-`ResearchRun.experiment` создаёт `ExperimentResult` с исходной `hypothesis`, затем получает redacted событие, но заменяет только `result.decision`; гипотеза остаётся исходной (`automl_agent/agent.py:260-266`). Позже результат сериализуется в `state.json` и `experiments.json` (`:150-159`), а также в `report.json` и `report.md` (`:494-509`).
+Проверка в этом worktree: `/Users/egoraprelsky/Desktop/coding/alfa_hackathon/.venv/bin/python -m pytest tests/test_decisions.py -k 'key_echo or task_contract or recovers_assessment' -q --tb=short` — **3 passed, 11 deselected**. Root сообщил полный результат: **89 passed**.
 
-Воспроизведено коротким offline test-run с fake provider: когда `hypothesis` и `decision.rationale` содержали значение `OPENAI_API_KEY`, секрет отсутствовал в `events.jsonl`, `agent.log` и `decisions.jsonl`, но присутствовал в `state.json`, `experiments.json`, `report.json` и `report.md`. Событие журнала возвращает redacted гипотезу, поэтому присваивание `result.hypothesis = recorded["payload"]["hypothesis"]` до последующих записей закрыло бы проверенный путь утечки. Сходную проверку стоит применить к другим свободным строкам результата перед записью snapshots.
+## Остаточный finding
 
-### [P2] Стратегия объявляет `weighted_f1` метрикой минимизации
+### [P2] Resume завершённого pre-fix run возвращает и сохраняет прежний незаредактированный отчёт
 
-В `automl_agent/strategy.py:62` максимум выбирается по явному списку, где нет `weighted_f1`. Однако `data.py` разрешает эту метрику для классификации и задаёт `maximize=True` для всех метрик кроме `rmse`, `mae`, `log_loss`. Для задачи с `weighted_f1` сохранённый shortlist/`agent.log` поэтому утверждает обратное направление, чем фактическое правило выбора и `experiment_assessed`.
+В `ResearchRun.execute` ранний путь для неактивного запуска с `report.json` возвращает `_read_json(report.json)` без `journal.redact`, перезаписи отчёта или checkpoint. `ResearchRun.__init__` redacts восстановленные `ExperimentResult` в памяти, но оставляет исходные `state.json` и отчёты на диске. Для completed run, созданного до `edba428` и содержащего ранее утёкший ключ, `--resume` поэтому всё ещё возвращает секрет и оставляет его в `state.json`, `report.json` и `report.md`.
 
-Проверено прямым вызовом `plan_research`: он возвращает `weighted_f1: минимум на одном split`.
+Воспроизведено в этом worktree: создан завершённый offline run, в старые snapshots и отчёты добавлена строка-маркер, затем выполнен no-op `--resume`; маркер сохранился в возвращённом report и всех трёх файлах. Новые запуски на `edba428` проверенным тестом покрыты; остаток касается миграции/очистки уже существующих завершённых директорий.
 
-### [P2] Resume не восстанавливает host assessment после сбоя между двумя событиями
+## Другие проверенные пункты
 
-`experiment` сохраняет `trial_completed` и следующим отдельным append сохраняет `experiment_assessed` (`automl_agent/agent.py:300-301`). При остановке процесса в этом промежутке результат уже восстановится из canonical journal, но `ResearchRun._recover_calls` восстанавливает только отсутствующий `trial_completed` (`:134-148`); он не проверяет и не дополняет отсутствующие assessments. В результате завершённый trial остаётся без обещанного проверяемого host-объяснения в `agent.log` и `decisions.jsonl` после `--resume`.
-
-## Проверенные пункты без findings
-
-- Публичный decision с настроенным API key redacts правильно в `events.jsonl` и двух audit-проекциях; сырой prompt/code отсутствует в `agent.log` и `decisions.jsonl`.
-- Оценка host отдельно показывает измеренную метрику и фактическую estimator chain; baseline shortlist представлен как стартовая рекомендация, а fallback явно указывает на ExtraTrees и его причину.
-- Вызов `tail -F` документирован для атомарно заменяемого `agent.log`.
-- Повторный `--resume` восстанавливает повреждённые проекции из canonical events без дублирования строк.
-
-## Исправления root
-Все три findings покрыты regression-тестами в tests/test_decisions.py. Результаты и snapshots проходят canonical redaction, направление стратегии берётся из TaskSpec.maximize, а отсутствующий assessment восстанавливается с recovered=true и номером исходного completion. Проверка исправлений: 19 целевых тестов passed; полный повторный suite: 89 passed, exit 0 (27.35s).
+- Public decision values редактируются при записи canonical events и при выводе в audit-проекции; raw prompts/code не попадают в `agent.log` и `decisions.jsonl`.
+- В host assessment отображаются измеренная метрика и фактическая estimator chain; shortlist не объявляет победителя.
+- `tail -F` указан для атомарно заменяемого `agent.log`.
+- Исправление assessment recovery не повторяет завершённое обучение и не дублирует восстановленные записи при следующем resume.
