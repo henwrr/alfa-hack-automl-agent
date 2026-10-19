@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import itertools
 import json
 import os
 import sys
@@ -16,6 +17,149 @@ import joblib
 import numpy as np
 import pandas as pd
 import cloudpickle
+
+
+_MAX_ESTIMATOR_DEPTH = 6
+_MAX_ESTIMATOR_COUNT = 32
+_MAX_PIPELINE_STEPS = 32
+_MAX_WRAPPER_CHILDREN = 16
+_MAX_METADATA_NAME_LENGTH = 160
+_ESTIMATOR_LINKS = (
+    "model", "_model", "estimator_", "estimator", "_estimator", "best_estimator_",
+    "base_estimator_", "base_estimator", "final_estimator_", "final_estimator",
+    "regressor_", "classifier_", "transformer_", "calibrated_classifiers_",
+    "estimators_", "named_estimators_",
+)
+
+
+def _class_name(value: Any) -> str:
+    """Return a bounded fully-qualified class name without inspecting the value."""
+    try:
+        cls = type(value)
+        module = type.__getattribute__(cls, "__module__")
+        name = type.__getattribute__(cls, "__qualname__")
+        if not isinstance(module, str) or not isinstance(name, str):
+            raise TypeError("class name is not text")
+        result = f"{module}.{name}"
+    except Exception:
+        result = "builtins.object"
+    return result[:_MAX_METADATA_NAME_LENGTH]
+
+
+def _instance_dict(value: Any) -> dict:
+    """Read instance state while bypassing custom __getattribute__ methods."""
+    try:
+        attributes = object.__getattribute__(value, "__dict__")
+    except Exception:
+        return {}
+    return attributes if isinstance(attributes, dict) else {}
+
+
+def _is_sklearn_pipeline(value: Any) -> bool:
+    try:
+        mro = type.__getattribute__(type(value), "__mro__")
+        return any(
+            type.__getattribute__(base, "__module__") == "sklearn.pipeline"
+            and type.__getattribute__(base, "__name__") == "Pipeline"
+            for base in mro
+        )
+    except Exception:
+        return False
+
+
+def _pipeline_step_pairs(value: Any) -> list[tuple[str, Any]]:
+    raw_steps = _instance_dict(value).get("steps")
+    if not isinstance(raw_steps, (list, tuple)):
+        return []
+    pairs = []
+    if isinstance(raw_steps, list):
+        step_iterator = list.__iter__(raw_steps)
+    else:
+        step_iterator = tuple.__iter__(raw_steps)
+    for index, pair in enumerate(itertools.islice(step_iterator, _MAX_PIPELINE_STEPS)):
+        if type(pair) not in (list, tuple) or len(pair) != 2:
+            continue
+        if type(pair) is list:
+            name, step = list.__getitem__(pair, 0), list.__getitem__(pair, 1)
+        else:
+            name, step = tuple.__getitem__(pair, 0), tuple.__getitem__(pair, 1)
+        # sklearn step names are strings. Avoid calling custom __str__ methods.
+        if type(name) is str:
+            safe_name = name[:_MAX_METADATA_NAME_LENGTH]
+        else:
+            safe_name = f"step_{index}"
+        pairs.append((safe_name, step))
+    return pairs
+
+
+def _linked_estimators(value: Any) -> list[Any]:
+    attributes = _instance_dict(value)
+    children = []
+    for key in _ESTIMATOR_LINKS:
+        if key not in attributes:
+            continue
+        child = attributes[key]
+        if isinstance(child, dict):
+            remaining = _MAX_WRAPPER_CHILDREN - len(children)
+            children.extend(itertools.islice(dict.values(child), remaining))
+        elif isinstance(child, (list, tuple)):
+            remaining = _MAX_WRAPPER_CHILDREN - len(children)
+            if isinstance(child, list):
+                children.extend(itertools.islice(list.__iter__(child), remaining))
+            else:
+                children.extend(itertools.islice(tuple.__iter__(child), remaining))
+        else:
+            children.append(child)
+        if len(children) >= _MAX_WRAPPER_CHILDREN:
+            break
+    return children
+
+
+def _estimator_details(estimator: Any) -> dict[str, Any]:
+    """Describe a fitted estimator graph using only bounded, known links.
+
+    This deliberately avoids get_params(), repr(), arbitrary properties, and
+    training attributes such as feature names or target values. Metadata is
+    best-effort and must never make model evaluation fail.
+    """
+    root_class = _class_name(estimator)
+    chain: list[str] = []
+    pipeline_steps: list[dict[str, str]] = []
+    seen: set[int] = set()
+    pending: list[tuple[Any, int]] = [(estimator, 0)]
+    try:
+        while pending and len(seen) < _MAX_ESTIMATOR_COUNT:
+            current, depth = pending.pop(0)
+            identity = id(current)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            current_class = _class_name(current)
+            chain.append(current_class)
+            if depth >= _MAX_ESTIMATOR_DEPTH:
+                continue
+
+            if _is_sklearn_pipeline(current):
+                pairs = _pipeline_step_pairs(current)
+                remaining_steps = _MAX_PIPELINE_STEPS - len(pipeline_steps)
+                for name, step in pairs[:remaining_steps]:
+                    pipeline_steps.append({"name": name, "class": _class_name(step)})
+                    pending.append((step, depth + 1))
+            else:
+                for child in _linked_estimators(current):
+                    # Ignore scalar bookkeeping values; wrapper links should
+                    # lead to estimator objects, not target or feature data.
+                    if child is None or isinstance(child, (str, bytes, int, float, bool)):
+                        continue
+                    pending.append((child, depth + 1))
+    except Exception:
+        # A malformed or unusual third-party wrapper must not affect the fit.
+        pass
+    return {
+        "class": root_class,
+        "estimator_chain": chain[:_MAX_ESTIMATOR_COUNT] or [root_class],
+        "pipeline_steps": pipeline_steps[:_MAX_ESTIMATOR_COUNT],
+    }
 
 
 def _json_value(value: Any) -> Any:
@@ -133,6 +277,7 @@ def _run_manifest(manifest_path: Path) -> dict:
     if not callable(getattr(model, "fit", None)) or not callable(getattr(model, "predict", None)):
         raise TypeError("build_model(context) должен вернуть estimator с fit и predict")
     model.fit(train_x, train_y.to_numpy())
+    estimator_details = _estimator_details(model)
 
     artifact_dir = Path(manifest["artifact_dir"]).expanduser().resolve()
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -198,7 +343,8 @@ def _run_manifest(manifest_path: Path) -> dict:
         "validation_rows": int(len(validation_x)) if validation_x is not None else None,
         "test_rows": int(len(test_x)),
         "target": target,
-        "model_class": f"{type(model).__module__}.{type(model).__qualname__}",
+        "model_class": estimator_details["class"],
+        "estimator_details": estimator_details,
         "valid_predictions": "valid_predictions.csv" if validation_x is not None else None,
         "test_predictions": "test_predictions.csv",
         "probabilities": "valid_probabilities.npy" if probability_written else None,
