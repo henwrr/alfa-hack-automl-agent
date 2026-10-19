@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+agent_runs/
+submission.csv
+data/
+tests/last_llm_request.json
+.DS_Store
+.idea/
