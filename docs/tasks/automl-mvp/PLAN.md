@@ -6,13 +6,13 @@
 | 2. Архитектура Harness | upstream master pin | DEEPSEEK_HARNESS_SUMMARY.md | harness_architecture / automl-harness-architecture | ссылки/ключевые исходники | завершено, проверено ведущим |
 | 3. Надёжность Harness | upstream master pin | docs/research/DEEPSEEK_HARNESS_RELIABILITY.md | harness_reliability / automl-harness-reliability | ссылки/семантика retries/timeout/checkpoint | завершено, проверено ведущим |
 | 4. Требования и интерфейсы | 1–3, ответы пользователя | SPEC.md, CONTRACTS.md, contracts.py | ведущий | сверка AC, отсутствие dataset-specific contracts | готово |
-| 5. Данные/worker/evaluator | 4 | data.py, modeling.py, worker.py, evaluation.py; собственные тесты | ml_engine / отдельный worktree | red→green unit/integration tests на новых схемах/категориях/редких классах/NaN/инвалидах CSV | запланировано |
-| 6. Runtime/providers/journal | 4, параллельно 5 | runtime.py, providers.py, journal.py; собственные тесты | harness_runtime / отдельный worktree | red→green: transient/permanent HTTP, timeout/потомки/output cap, corruption/recovery/secrets | запланировано |
-| 7. Упаковка и acceptance | 4, параллельно 5–6 | scripts, requirements-mvp/dev, README, Dockerfile, .env.example, tests/test_packaging.py, tests/test_acceptance.py | delivery / отдельный worktree | unpack ZIP+CLI, fake OpenAI tools/recovery без Ollama | запланировано |
-| 8. Agent loop и CLI | 4, интеграция 5–7 | solution.py, config.py, prompts.py, tools.py, agent.py | ведущий | ранний CSV, LLM-решения/код, host scoring, budgets, checkpoint/resume/report | запланировано |
-| 9. Интеграция и ревью | 5–8 | общая ветка, тесты и исправления | ведущий | полный pytest, diff --check, запуск из другой cwd/ZIP | запланировано |
-| 10. Реальные публичные прогоны | 9, Ollama | runs/ артефакты, TESTS.md | ведущий | оба полных CSV, >=1 LLM-кандидат, валидные submission, записанные метрики | запланировано |
-| 11. Завершение | 10 | README, STATE/TESTS, dist/solution.zip | ведущий | чистая aprelskiy_branch; архив без секретов/данных, инструкция запуска | запланировано |
+| 5. Данные/worker/evaluator | 4 | data.py, modeling.py, worker.py, evaluation.py; собственные тесты | ml_engine / отдельный worktree | red→green unit/integration tests на новых схемах/категориях/редких классах/NaN/инвалидах CSV | завершено, проверено и интегрировано |
+| 6. Runtime/providers/journal | 4, параллельно 5 | runtime.py, providers.py, journal.py; собственные тесты | harness_runtime / отдельный worktree | red→green: transient/permanent HTTP, timeout/потомки/output cap, corruption/recovery/secrets | завершено, проверено и интегрировано |
+| 7. Упаковка и acceptance | 4, параллельно 5–6 | scripts, requirements-mvp/dev, README, Dockerfile, .env.example, tests/test_packaging.py, tests/test_acceptance.py | delivery / отдельный worktree | unpack ZIP+CLI, fake OpenAI tools/recovery без Ollama | завершено, проверено и интегрировано |
+| 8. Agent loop и CLI | 4, интеграция 5–7 | solution.py, config.py, prompts.py, tools.py, agent.py | ведущий | ранний CSV, LLM-решения/код, host scoring, budgets, checkpoint/resume/report | завершено, проверено и интегрировано |
+| 9. Интеграция и ревью | 5–8 | общая ветка, тесты и исправления | ведущий | полный pytest, diff --check, запуск из другой cwd/ZIP | завершено, проверено и интегрировано |
+| 10. Реальные публичные прогоны | 9, Ollama | runs/ артефакты, TESTS.md | ведущий | оба полных CSV, >=1 LLM-кандидат, валидные submission, записанные метрики | завершено, проверено и интегрировано |
+| 11. Завершение | 10 | README, STATE/TESTS, dist/solution.zip | ведущий | чистая aprelskiy_branch; архив без секретов/данных, инструкция запуска | завершено, проверено и интегрировано |
 
 ## Базовый коммит
 
@@ -26,4 +26,4 @@
 
 Один общий monotonic wall deadline включает API retries, cleanup и final fit; финальная доля бюджета резервируется. По умолчанию один training child, <=8 потоков. Journal сохраняет точный request и call intent до эффекта, результат после, не пишет ключи. Числовые метрики и provenance остаются в structured ledger независимо от сокращения model context. Возобновление проверяет fingerprint входов и конфигурацию split; незавершённые calls получают явный interrupted outcome.
 
-Qwen API и Docker проверяются при фактической доступности. Пока acceptance использует локальный fake OpenAI server и реальные Ollama прогоны. Ограничение по скрытым задачам: MVP поддерживает supervised tabular CSV; расширение на неизвестные форматы требует новых evaluator/input contracts, поскольку материалов по ним нет.
+Qwen API и Docker проверяются при фактической доступности. Acceptance использует локальный fake OpenAI server; оба полных public-прогона и дополнительный прогон на новой схеме через Ollama завершены. Ограничение по скрытым задачам: MVP поддерживает supervised tabular CSV; расширение на неизвестные форматы требует новых evaluator/input contracts, поскольку материалов по ним нет.

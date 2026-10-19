@@ -110,8 +110,6 @@ autoresearch/
 
 По README, проект находится в developer preview и допускает breaking changes. `SAFETY.md` называет его экспериментальным и не прошедшим security audit; явно предупреждает, что model-generated code/commands могут работать с предоставленными файлами, процессами, сетью и credentials, а sandbox/approval не являются гарантией изоляции. Это важно для AutoResearch, потому что центральный инструмент исполняет Python ([`SAFETY.md`](https://github.com/deepseek-ai/deepseek-harness/blob/687f282e8625c6b8d11ff58211a90524be2e4317/SAFETY.md#L5-L23)).
 
-## Ключевые первоисточники
-
 ## Выжимка второго исследования: надёжность исполнения
 
 Полное независимое исследование: [DEEPSEEK_HARNESS_RELIABILITY.md](docs/research/DEEPSEEK_HARNESS_RELIABILITY.md). Оркестратор прочитал оба исследования и сверил ключевые границы с upstream-кодом.
@@ -125,7 +123,7 @@ autoresearch/
 
 Для MVP эти меры включаются вместе с архитектурными контрактами. Полная плагинная среда DeepSeek не переносится; используется самостоятельная Python-реализация идей без копирования upstream-кода.
 
-### Ссылки на архитектуру
+## Ключевые первоисточники
 
 - [README.md](https://github.com/deepseek-ai/deepseek-harness/blob/687f282e8625c6b8d11ff58211a90524be2e4317/README.md) — назначение, plugin architecture, preview и ссылки на архитектуру.
 - [`packages/core/agent-loop`](https://github.com/deepseek-ai/deepseek-harness/tree/687f282e8625c6b8d11ff58211a90524be2e4317/packages/core/agent-loop) — README и код turn/step.
