@@ -1,0 +1,24 @@
+Альфа Хак_AutoML .pdf
+.DS_Store
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.env
+.env.*
+!.env.example
+runs/
+artifacts/
+dist/
+tmp/
+catboost_info/
+*.log
+/Регрессия/train.csv
+/Регрессия/test.csv
+/Регрессия/sample_submission.csv
+/Многоклассовая классификация/train.csv
+/Многоклассовая классификация/test.csv
+/Многоклассовая классификация/sample_submission.csv
+submission.csv
