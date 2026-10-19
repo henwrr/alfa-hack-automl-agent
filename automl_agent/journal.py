@@ -125,6 +125,10 @@ class EventJournal:
             os.fsync(fd)
         return events
 
+    def redact(self, value: Any) -> Any:
+        """Use the canonical secret policy for public snapshots and reports too."""
+        return self._redact(value)
+
     def _redact_text(self, value: str) -> str:
         for secret in self.secrets:
             value = value.replace(secret, "[REDACTED]")

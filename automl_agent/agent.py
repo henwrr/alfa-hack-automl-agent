@@ -85,7 +85,7 @@ class ResearchRun:
                 result = event.get("result", {})
                 if "trial_id" in result:
                     completed[result["trial_id"]] = result
-        self.results = [ExperimentResult.from_dict(r) for r in completed.values()]
+        self.results = [ExperimentResult.from_dict(self.journal.redact(r)) for r in completed.values()]
         spent = float(self.state.get("elapsed_seconds", 0))
         if self.state.get("active"):
             spent += max(0.0, time.time() - self.state.get("checkpoint_epoch", time.time()))
@@ -103,6 +103,7 @@ class ResearchRun:
         self.tool_results = {e.get("call_id"): e.get("result") for e in events if e.get("event") == "tool_result"}
         self._recover_calls(events)
         self._recover_model_state(events)
+        self._recover_assessments()
 
     def _recover_model_state(self, events):
         from .contracts import ModelResponse
@@ -147,6 +148,28 @@ class ResearchRun:
                 self.journal.append("trial_completed", result=result.to_dict())
                 finished.add(trial_id)
 
+    def _recover_assessments(self):
+        """Rebuild missing host explanations from completed, measured trials.
+
+        A crash can land between the durable result and its audit assessment.
+        Replaying this pure selection rule never reruns training or an LLM.
+        """
+        from .strategy import assess_experiment
+
+        events = self.journal.read_events()
+        assessed = {e["payload"].get("trial_id") for e in events if e["event"] == "experiment_assessed"}
+        ledger = {}
+        for event in events:
+            if event["event"] != "trial_completed":
+                continue
+            result = ExperimentResult.from_dict(event["payload"]["result"])
+            previous = select_best([r for key, r in ledger.items() if key != result.trial_id], self.task.maximize)
+            if result.trial_id not in assessed:
+                assessment = assess_experiment(result, previous, self.task.maximize, self.task.metric)
+                self.journal.append("experiment_assessed", **assessment, recovered=True, completion_seq=event["seq"])
+                assessed.add(result.trial_id)
+            ledger[result.trial_id] = result
+
     def checkpoint(self, active=True):
         from .journal import atomic_write_json
 
@@ -155,6 +178,7 @@ class ResearchRun:
                  "elapsed_seconds": self.budget.elapsed(), "checkpoint_epoch": time.time(), "active": active,
                  "total_tokens": self.tokens_used, "llm_calls": self.steps, "trials": [r.to_dict() for r in self.results],
                  "selected_trial": best.trial_id if best else None, "stop_reason": self.stop_reason}
+        state = self.journal.redact(state)
         atomic_write_json(self.state_path, state)
         atomic_write_json(self.directory / "experiments.json", {"trials": state["trials"], "selected_trial": state["selected_trial"]})
 
@@ -263,8 +287,9 @@ class ResearchRun:
         # Persist the public explanation before running untrusted candidate code.
         recorded = self.journal.append("decision_recorded", **explanation)
         result.decision = recorded["payload"]["decision"]
+        result.hypothesis = recorded["payload"]["hypothesis"]
         atomic_write_json(directory / "decision.json", recorded["payload"])
-        self.journal.append("trial_started", trial_id=trial_id, code_hash=code_hash, hypothesis=hypothesis, is_baseline=is_baseline, decision=result.decision)
+        self.journal.append("trial_started", trial_id=trial_id, code_hash=code_hash, hypothesis=result.hypothesis, is_baseline=is_baseline, decision=result.decision)
         self.checkpoint()
         try:
             validate_candidate_code(code)
@@ -275,7 +300,7 @@ class ResearchRun:
             process = run_process([sys.executable, "-m", "automl_agent.worker", "--manifest", str(directory / "manifest.json")],
                                   cwd=directory, timeout=min(self.config.trial_timeout, remaining), n_jobs=self.config.n_jobs,
                                   memory_limit_mb=self.config.memory_limit_mb, env={"PYTHONPATH": str(Path(__file__).resolve().parent.parent)})
-            atomic_write_json(directory / "process.json", process.to_dict())
+            atomic_write_json(directory / "process.json", self.journal.redact(process.to_dict()))
             result.seconds = process.seconds
             result.status = process.status
             if process.status == "ok":
@@ -296,9 +321,10 @@ class ResearchRun:
         except Exception as exc:
             result.status = "error"
             result.error = f"{type(exc).__name__}: {exc}"[-4000:]
+        result = ExperimentResult.from_dict(self.journal.redact(result.to_dict()))
         self.results.append(result)
-        self.journal.append("trial_completed", result=result.to_dict())
-        self.journal.append("experiment_assessed", **assess_experiment(result, previous_best, self.task.maximize, self.task.metric))
+        completion = self.journal.append("trial_completed", result=result.to_dict())
+        self.journal.append("experiment_assessed", **assess_experiment(result, previous_best, self.task.maximize, self.task.metric), completion_seq=completion["seq"])
         best = select_best(self.results, self.task.maximize)
         if best is result:
             publish_submission(self.task, Path(result.prediction_path), self.output)
@@ -416,7 +442,7 @@ class ResearchRun:
         process = run_process([sys.executable, "-m", "automl_agent.worker", "--manifest", str(directory / "manifest.json")],
                               cwd=directory, timeout=min(self.config.trial_timeout, self.budget.remaining() - 1), n_jobs=self.config.n_jobs,
                               memory_limit_mb=self.config.memory_limit_mb, env={"PYTHONPATH": str(Path(__file__).resolve().parent.parent)})
-        atomic_write_json(directory / "process.json", process.to_dict())
+        atomic_write_json(directory / "process.json", self.journal.redact(process.to_dict()))
         outcome = {"status": process.status, "artifact_dir": str(directory), "seconds": process.seconds}
         if process.status == "ok":
             try:
@@ -427,6 +453,7 @@ class ResearchRun:
                 outcome.update(status="invalid_output", error=str(exc))
         else:
             outcome["error"] = (process.stderr or process.stdout)[-3000:]
+        outcome = self.journal.redact(outcome)
         self.journal.append("final_fit_completed", result=outcome)
         if process.status == "cancelled":
             raise KeyboardInterrupt
@@ -444,7 +471,7 @@ class ResearchRun:
             return _read_json(self.directory / "report.json")
         self.journal.append("run_resumed" if self.config.resume else "run_started", config=self.config.public_dict(), data_fingerprint=self.task.data_fingerprint)
         atomic_write_json(self.directory / "config.json", self.config.public_dict())
-        atomic_write_json(self.directory / "task.json", self.task.to_dict())
+        atomic_write_json(self.directory / "task.json", self.journal.redact(self.task.to_dict()))
         versions = {}
         for name in ("numpy", "pandas", "scikit-learn", "catboost", "lightgbm", "xgboost", "optuna", "torch", "autogluon.tabular", "flaml", "lightautoml", "httpx", "psutil", "cloudpickle"):
             try:
@@ -497,6 +524,7 @@ class ResearchRun:
                   "total_tokens": self.tokens_used, "elapsed_seconds": round(self.budget.elapsed(), 3),
                   "submission_path": str(self.output), "run_dir": str(self.directory), "final_fit": final_fit, "validation": validation,
                   "decision_log": str(self.directory / "agent.log"), "decisions_path": str(self.directory / "decisions.jsonl")}
+        report = self.journal.redact(report)
         atomic_write_json(self.directory / "report.json", report)
         rows = ["# AutoResearch run", "", f"Status: {status}; stop: {self.stop_reason}", f"Metric: {self.task.metric}; best validation: {report['best_metric']}",
                 f"Submission: {self.output}", f"Decision log: {self.directory / 'agent.log'}", f"Structured decisions: {self.directory / 'decisions.jsonl'}", "", "| Trial | Status | Validation metric | Seconds |", "|---|---|---:|---:|"]
@@ -506,7 +534,7 @@ class ResearchRun:
                      f"Actual estimator: {' → '.join(result.model_details.get('estimator_chain', [])) or 'not recorded'}"]
         rows += ["", "The validation metric belongs to the fixed holdout experiment. The final refit uses all training rows.",
                  "Generated code runs in a supervised subprocess. Use the deployment container for OS-level filesystem/network isolation."]
-        (self.directory / "report.md").write_text("\n".join(rows) + "\n", encoding="utf-8")
+        (self.directory / "report.md").write_text(self.journal.redact("\n".join(rows) + "\n"), encoding="utf-8")
         self.journal.append("run_completed", report=report)
         self.checkpoint(active=False)
         return report

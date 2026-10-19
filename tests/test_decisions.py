@@ -96,7 +96,7 @@ def test_llm_decision_is_saved_separately_from_measured_outcome(tmp_path, monkey
 
 
 def test_strategy_uses_data_facts_and_available_packages():
-    task = SimpleNamespace(task_type='classification', metric='macro_f1', categorical_columns=['city'], feature_columns=['x', 'city'])
+    task = SimpleNamespace(task_type='classification', metric='macro_f1', maximize=True, categorical_columns=['city'], feature_columns=['x', 'city'])
     profile = {'train_shape': [1000, 3], 'categorical_columns': ['city'], 'features': {'city': {'missing': 5, 'unique': 300}},
                'target': {'class_counts': {'a': 900, 'b': 100}, 'unique': 2},
                'available_packages': {'catboost': '1.2.8', 'scikit-learn': '1.7.0'}}
@@ -161,3 +161,55 @@ def test_baseline_fallback_records_failure_and_estimator_backbone(monkeypatch):
     assert details.get('fallback_reason') == 'CatBoost: synthetic CatBoost parameter failure'
     assert details['estimator_chain'][-1].endswith('ExtraTreesRegressor'), 'report the ensemble, not its individual trees'
     assert len(model.predict(pd.DataFrame({'x': [1, 3]}))) == 2
+
+
+def test_key_echo_in_hypothesis_is_redacted_in_snapshots_and_reports(tmp_path, monkeypatch):
+    from automl_agent.journal import EventJournal
+    key = 'private-review-key-924'
+    task = make_task(tmp_path / 'data')
+    directory = tmp_path / 'run'
+    def complete(*args, **kwargs):
+        args = {'hypothesis': 'Reference ' + key, 'code': 'from sklearn.dummy import DummyRegressor\ndef build_model(context):\n    return DummyRegressor()\n'}
+        return ModelResponse({'role': 'assistant', 'tool_calls': [{'id': 'echo', 'type': 'function', 'function': {
+            'name': 'run_experiment', 'arguments': json.dumps(args)}}]}, total_tokens=30)
+    monkeypatch.setenv('OPENAI_MODEL', 'fake')
+    monkeypatch.setenv('AUTOML_PROVIDER', 'openai')
+    monkeypatch.setenv('OPENAI_API_KEY', key)
+    monkeypatch.setattr(OpenAICompatibleProvider, 'complete', complete)
+    report = run(config_for(task, directory))
+    assert key not in json.dumps(report)
+    for name in ('events.jsonl', 'decisions.jsonl', 'agent.log', 'state.json', 'experiments.json', 'report.json', 'report.md'):
+        assert key not in (directory / name).read_text(), name
+    assert '[REDACTED]' in report['trials'][-1]['hypothesis']
+
+
+def test_strategy_direction_follows_task_contract():
+    task = SimpleNamespace(task_type='classification', metric='weighted_f1', maximize=True, categorical_columns=[], feature_columns=['x'])
+    profile = {'train_shape': [50, 2], 'target': {}, 'features': {}, 'available_packages': {}}
+    config = SimpleNamespace(time_budget=90, reserve_seconds=10, trial_timeout=20, n_jobs=1)
+    assert 'максимум' in plan_research(task, profile, config)['selection_rule']
+
+
+def test_resume_recovers_assessment_after_completed_trial_without_reexecution(tmp_path, monkeypatch):
+    from automl_agent.agent import ResearchRun
+    from automl_agent.journal import EventJournal
+
+    task = make_task(tmp_path / 'data')
+    directory = tmp_path / 'run'
+    run(config_for(task, directory, '--offline'))
+    journal_path = directory / 'events.jsonl'
+    original = [json.loads(line) for line in journal_path.read_text().splitlines()]
+    kept = [e for e in original if e['event'] != 'experiment_assessed']
+    journal_path.write_text(''.join(json.dumps({**e, 'seq': i}) + '\n' for i, e in enumerate(kept, 1)))
+    before = len([e for e in kept if e['event'] == 'trial_started'])
+    def forbidden(*args, **kwargs):
+        raise AssertionError('resume must not rerun a completed trial')
+    monkeypatch.setattr(ResearchRun, 'experiment', forbidden)
+    run(config_for(task, directory, '--offline', '--resume'))
+    log = events(directory)
+    recovered = [e['payload'] for e in log if e['event'] == 'experiment_assessed']
+    assert len(recovered) == 1 and recovered[0]['recovered'] is True
+    assert recovered[0]['selected'] is True
+    assert before == len([e for e in log if e['event'] == 'trial_started'])
+    run(config_for(task, directory, '--offline', '--resume'))
+    assert len([e for e in events(directory) if e['event'] == 'experiment_assessed']) == 1

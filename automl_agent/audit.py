@@ -193,7 +193,7 @@ def _details_for(event: str, payload: dict) -> dict:
     if event == "experiment_assessed":
         return _selected(payload, (
             "trial_id", "metric_name", "metric", "previous_best", "maximize",
-            "selected", "delta", "reason", "model_details",
+            "selected", "delta", "reason", "model_details", "recovered", "completion_seq",
         ))
     if event == "research_finished":
         return _selected(payload, ("reason",))
@@ -414,6 +414,8 @@ def _event_text(event: str, details: dict) -> str:
         metric = details.get("metric")
         metric_name = details.get("metric_name", "метрика")
         result = f"Фактическая валидация {details.get('trial_id', 'trial')}: {metric_name}={_human_value(metric)}"
+        if details.get("recovered"):
+            result += "; оценка восстановлена из сохранённого результата"
         if "previous_best" in details:
             result += f", прошлый лучший результат={_human_value(details['previous_best'])}"
         if "delta" in details:

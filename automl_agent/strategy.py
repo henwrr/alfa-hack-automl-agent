@@ -59,7 +59,7 @@ def plan_research(task, profile, config):
         priorities.append("Обнаружен дисбаланс классов: проверить class_weights и метрики классов; сравнивать по целевой метрике, без обещания улучшения.")
     priorities.append("После каждого опыта сопоставить качество и время; ошибки исправлять по traceback, победителя выбирать только по host-метрике.")
     return {"facts": facts, "candidate_shortlist": shortlist, "priorities": priorities,
-            "selection_rule": f"{task.metric}: {'максимум' if task.metric in {'accuracy', 'macro_f1', 'f1', 'r2', 'roc_auc'} else 'минимум'} на одном split; при равенстве сохраняется предыдущий кандидат. Гарантии победы семейства нет.",
+            "selection_rule": f"{task.metric}: {'максимум' if task.maximize else 'минимум'} на одном split; при равенстве сохраняется предыдущий кандидат. Гарантии победы семейства нет.",
             "parallel_trials": 1,
             "budget": {"total_seconds": config.time_budget, "finalization_reserve_seconds": config.reserve_seconds,
                        "trial_timeout_seconds": config.trial_timeout, "threads_per_trial": config.n_jobs},

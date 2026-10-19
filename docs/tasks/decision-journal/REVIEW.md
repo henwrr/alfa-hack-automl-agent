@@ -26,3 +26,6 @@
 - Оценка host отдельно показывает измеренную метрику и фактическую estimator chain; baseline shortlist представлен как стартовая рекомендация, а fallback явно указывает на ExtraTrees и его причину.
 - Вызов `tail -F` документирован для атомарно заменяемого `agent.log`.
 - Повторный `--resume` восстанавливает повреждённые проекции из canonical events без дублирования строк.
+
+## Исправления root
+Все три findings покрыты regression-тестами в tests/test_decisions.py. Результаты и snapshots проходят canonical redaction, направление стратегии берётся из TaskSpec.maximize, а отсутствующий assessment восстанавливается с recovered=true и номером исходного completion. Проверка исправлений: 19 целевых тестов passed; полный повторный suite: 89 passed, exit 0 (27.35s).
