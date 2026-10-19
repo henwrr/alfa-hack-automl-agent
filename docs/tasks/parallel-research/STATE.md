@@ -1,18 +1,9 @@
 # Состояние
 
-Этап: публичные прогоны и review.
+Реализация и проверки завершены. Ветка доставки — aprelskiy_branch. После финального коммита выполняются push и сверка remote SHA; подтверждённый SHA сообщается в финальном ответе.
 
-## Решения
-Один LLM-исследователь, два worker, единый host evaluator/ledger. Сравнение семейств и LLM используют одинаковый split и общий budget. Резерв пересчитывается по времени текущего победителя. Все изменения commit/push в aprelskiy_branch разрешены пользователем.
+Реализованы три семейства на одном split, два worker по четыре потока, root-only ledger/publisher, единый max-trials, восстановление неизвестных исходов без повторения и адаптивный резерв финального обучения. Один LLM-исследователь, без новых runtime LLM-агентов.
 
-## Выполнено
-Прочитаны исходники, публичные профили и инструкции. Базовая ветка dedbb05; remote aprelskiy_branch указывает f5feddc. Бюджеты/контракты записаны.
+160 тестов прошли; независимое ревью не нашло P1/P2. Обе публичные задачи проверены живой Ollama; refit, CSV, reload/predict, интервалы процессов и восстановление проекций подтверждены. Четыре LLM-кандидата регрессии упали: статус degraded отражён честно, выбран успешный ExtraTrees из начального сравнения. API организаторов, Docker и трёхчасовой soak не проверены.
 
-## Следующий шаг
-Полный suite160 passed. Выполнить live Ollama на двух публичных задачах последовательно, независимое review, повторная проверка артефактов и push.
-
-## Блокеры
-Нет.
-
-## Интегрировано
-Семейства CatBoost/ExtraTrees/Linear, строгий CatBoost с исходными150итерациями, sparse-compatible preprocessing, ProcessResult timestamps/pid/n_jobs, cancellation-aware scheduler, чистая reservepolicy, batch tool и общий max-trials, root-only ledger/publisher. Исправлено округление fit-row ratio по фактическому splitter.
+Подробности: docs/VALIDATION.md и docs/validation/parallel-public-2026-10-19.json. Артефакты локально в runs/parallel-public; runtime ZIP в dist/solution.zip. Все четыре изолированные worktree исполнителей архивированы после интеграции.
