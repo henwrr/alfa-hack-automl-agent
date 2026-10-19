@@ -55,15 +55,16 @@ def _source(default_n_jobs, model_family):
                 seed = int(context.get("seed", 42))
                 common = {{
                     "iterations": 150,
-                    "depth": 7,
-                    "learning_rate": 0.05,
                     "random_seed": seed,
                     "thread_count": _threads(context),
                     "verbose": False,
                     "allow_writing_files": False,
                 }}
                 if context.get("task_type") == "classification":
-                    estimator = CatBoostClassifier(**common, cat_features=categorical)
+                    classification = {{}}
+                    if len(context.get("classes", [])) > 2:
+                        classification["loss_function"] = "MultiClass"
+                    estimator = CatBoostClassifier(**common, **classification, cat_features=categorical)
                 else:
                     estimator = CatBoostRegressor(**common, cat_features=categorical)
                 prepare = FunctionTransformer(
@@ -97,6 +98,13 @@ def _source(default_n_jobs, model_family):
                 values = frame.to_numpy(dtype=np.float64)
                 return np.where(np.isfinite(values), values, np.nan)
 
+            def _clean_categorical(X):
+                frame = pd.DataFrame(X).copy()
+                for column in frame.columns:
+                    values = frame[column].astype("object")
+                    frame[column] = values.where(pd.notna(values), "__missing__").astype(str)
+                return frame
+
             def build_model(context):
                 columns = list(context.get("feature_columns", []))
                 categorical = [name for name in context.get("categorical_columns", []) if name in columns]
@@ -110,7 +118,7 @@ def _source(default_n_jobs, model_family):
                     branches.append(("numeric", numeric_pipeline, numeric))
                 if categorical:
                     categorical_pipeline = Pipeline([
-                        ("impute", SimpleImputer(strategy="constant", fill_value="__missing__", keep_empty_features=True)),
+                        ("clean", FunctionTransformer(_clean_categorical, validate=False)),
                         ("encode", OneHotEncoder(
                             handle_unknown="ignore",
                             min_frequency=25,
@@ -161,6 +169,13 @@ def _source(default_n_jobs, model_family):
             values = frame.to_numpy(dtype=np.float64)
             return np.where(np.isfinite(values), values, np.nan)
 
+        def _clean_categorical(X):
+            frame = pd.DataFrame(X).copy()
+            for column in frame.columns:
+                values = frame[column].astype("object")
+                frame[column] = values.where(pd.notna(values), "__missing__").astype(str)
+            return frame
+
         def build_model(context):
             columns = list(context.get("feature_columns", []))
             categorical = [name for name in context.get("categorical_columns", []) if name in columns]
@@ -176,7 +191,7 @@ def _source(default_n_jobs, model_family):
                 branches.append(("numeric", numeric_pipeline, numeric))
             if categorical:
                 categorical_pipeline = Pipeline([
-                    ("impute", SimpleImputer(strategy="constant", fill_value="__missing__", keep_empty_features=True)),
+                    ("clean", FunctionTransformer(_clean_categorical, validate=False)),
                     ("encode", OneHotEncoder(
                         handle_unknown="ignore",
                         min_frequency=25,
@@ -227,7 +242,9 @@ def family_candidates(task, profile, n_jobs=4, limit=3):
                 "task_type": task_type,
                 "n_jobs": default_n_jobs,
                 "iterations": 150,
-                "depth": 7,
+                "depth": "CatBoost default",
+                "learning_rate": "CatBoost automatic default",
+                "multiclass_loss": "MultiClass when context has more than two classes",
                 "class_weights": None,
             },
         ))

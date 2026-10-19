@@ -64,6 +64,23 @@ def test_generators_return_distinct_complete_ast_linted_candidates():
         validate_candidate_code(candidate["code"])
 
 
+def test_catboost_uses_incumbent_iterations_and_native_defaults():
+    candidate = next((
+        item for item in families.family_candidates(_task("classification"), _profile())
+        if item["family"] == "CatBoost"
+    ), None)
+    if candidate is None:
+        pytest.skip("CatBoost is not installed")
+
+    assert '"iterations": 150' in candidate["code"]
+    assert '"depth":' not in candidate["code"]
+    assert '"learning_rate":' not in candidate["code"]
+    assert '"MultiClass"' in candidate["code"]
+    assert candidate["decision"]["iterations"] == 150
+    assert candidate["decision"]["depth"] == "CatBoost default"
+    assert candidate["decision"]["learning_rate"] == "CatBoost automatic default"
+
+
 def test_limit_order_and_cpu_context_are_stable():
     first = families.family_candidates(_task("regression"), _profile(), n_jobs=2, limit=2)
     second = families.family_candidates(_task("regression"), _profile(), n_jobs=2, limit=2)
@@ -175,6 +192,50 @@ def test_linear_categorical_transform_stays_sparse_for_many_categories():
 
     assert sparse.issparse(transformed)
     assert transformed.shape[1] > 20
+
+
+@pytest.mark.parametrize("family", ["ExtraTrees", "Linear"])
+@pytest.mark.parametrize("task_type", ["regression", "classification"])
+def test_sklearn_families_handle_mixed_categorical_types_and_infinities(family, task_type):
+    task = _task(task_type)
+    candidate = next(
+        item for item in families.family_candidates(task, _profile())
+        if item["family"] == family
+    )
+    module = types.ModuleType(f"test_mixed_categories_{family}_{task_type}")
+    exec(compile(candidate["code"], f"<{module.__name__}>", "exec"), module.__dict__)
+    category_values = ["alpha", 7, np.inf, None, -np.inf, 3.5]
+    X = pd.DataFrame({
+        "number": np.arange(72, dtype=float),
+        "category": [category_values[index % len(category_values)] for index in range(72)],
+        "category_2": ["left" if index % 2 else None for index in range(72)],
+    })
+    y = (
+        np.random.default_rng(19).permutation(np.repeat(["class_a", "class_b", "class_c"], 24))
+        if task_type == "classification" else np.arange(72, dtype=float)
+    )
+    model = module.build_model({
+        "task_type": task_type,
+        "metric": task.metric,
+        "feature_columns": task.feature_columns,
+        "categorical_columns": task.categorical_columns,
+        "classes": task.classes,
+        "seed": task.seed,
+        "n_jobs": 2,
+    })
+
+    model.fit(X, y)
+    validation = pd.DataFrame({
+        "number": [1.5, np.nan, 9.0],
+        "category": [42, np.inf, None],
+        "category_2": ["unseen", -np.inf, None],
+    })
+    prediction = model.predict(validation)
+
+    assert len(prediction) == len(validation)
+    encoder = model.named_steps["preprocess"].named_transformers_["categorical"].named_steps["encode"]
+    observed_categories = set(encoder.categories_[0])
+    assert {"7", "3.5", "inf", "-inf", "__missing__"} <= observed_categories
 
 
 @pytest.mark.parametrize("task_type", ["regression", "classification"])
