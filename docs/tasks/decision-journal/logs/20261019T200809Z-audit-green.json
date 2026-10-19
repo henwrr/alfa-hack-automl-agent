@@ -1,0 +1,7 @@
+{
+  "phase": "green",
+  "command": "/Users/egoraprelsky/Desktop/coding/alfa_hackathon/.venv/bin/python -m pytest tests/test_audit.py -q --tb=short",
+  "exit_code": 0,
+  "summary": "5 passed in 0.03s",
+  "output": ".....                                                                    [100%]\n5 passed in 0.03s"
+}
