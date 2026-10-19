@@ -22,13 +22,13 @@ import cloudpickle
 _MAX_ESTIMATOR_DEPTH = 6
 _MAX_ESTIMATOR_COUNT = 32
 _MAX_PIPELINE_STEPS = 32
-_MAX_WRAPPER_CHILDREN = 16
 _MAX_METADATA_NAME_LENGTH = 160
 _ESTIMATOR_LINKS = (
-    "model", "_model", "estimator_", "estimator", "_estimator", "best_estimator_",
-    "base_estimator_", "base_estimator", "final_estimator_", "final_estimator",
-    "regressor_", "classifier_", "transformer_", "calibrated_classifiers_",
-    "estimators_", "named_estimators_",
+    # Prefer fitted links. Following both estimator_ and the original estimator
+    # would incorrectly present an unfitted template as a trained backend.
+    "best_estimator_", "estimator_", "regressor_", "classifier_", "final_estimator_",
+    "model", "_model", "_estimator", "estimator", "base_estimator_",
+    "base_estimator", "final_estimator",
 )
 
 
@@ -93,26 +93,19 @@ def _pipeline_step_pairs(value: Any) -> list[tuple[str, Any]]:
 
 
 def _linked_estimators(value: Any) -> list[Any]:
+    # sklearn ensembles expose original base-estimator templates as well as
+    # fitted members. The ensemble is the predictor; neither is a next step.
+    if _class_name(value).startswith("sklearn.ensemble."):
+        return []
     attributes = _instance_dict(value)
-    children = []
     for key in _ESTIMATOR_LINKS:
-        if key not in attributes:
+        child = attributes.get(key)
+        # Ensemble members are parallel branches, not a chain of algorithms.
+        # Keep the fitted ensemble class, not dozens of individual trees.
+        if child is None or isinstance(child, (str, bytes, int, float, bool, dict, list, tuple)):
             continue
-        child = attributes[key]
-        if isinstance(child, dict):
-            remaining = _MAX_WRAPPER_CHILDREN - len(children)
-            children.extend(itertools.islice(dict.values(child), remaining))
-        elif isinstance(child, (list, tuple)):
-            remaining = _MAX_WRAPPER_CHILDREN - len(children)
-            if isinstance(child, list):
-                children.extend(itertools.islice(list.__iter__(child), remaining))
-            else:
-                children.extend(itertools.islice(tuple.__iter__(child), remaining))
-        else:
-            children.append(child)
-        if len(children) >= _MAX_WRAPPER_CHILDREN:
-            break
-    return children
+        return [child]
+    return []
 
 
 def _estimator_details(estimator: Any) -> dict[str, Any]:
@@ -155,11 +148,15 @@ def _estimator_details(estimator: Any) -> dict[str, Any]:
     except Exception:
         # A malformed or unusual third-party wrapper must not affect the fit.
         pass
-    return {
+    details = {
         "class": root_class,
         "estimator_chain": chain[:_MAX_ESTIMATOR_COUNT] or [root_class],
         "pipeline_steps": pipeline_steps[:_MAX_ESTIMATOR_COUNT],
     }
+    fallback = _instance_dict(estimator).get("fallback_reason")
+    if isinstance(fallback, str) and fallback:
+        details["fallback_reason"] = fallback[:1000]
+    return details
 
 
 def _json_value(value: Any) -> Any:

@@ -426,6 +426,9 @@ def _event_text(event: str, details: dict) -> str:
         chain = _model_chain(details.get("model_details"))
         if chain:
             result += f". Фактическая цепочка модели: {chain}"
+        fallback = _get_nested(details.get("model_details"), "fallback_reason")
+        if fallback:
+            result += f". Причина перехода на запасную модель: {_human_value(fallback)}"
         return result + "."
     if event == "research_finished":
         return f"Исследование завершено: {_human_value(details.get('reason', 'причина не указана'))}."
@@ -453,7 +456,7 @@ def _event_text(event: str, details: dict) -> str:
     if event == "fallback_written":
         return f"Записан резервный submission; стратегия={_human_value(details.get('strategy'))}."
     if event == "llm_request":
-        return f"Отправлен запрос LLM {details.get('request_id', '')}: {_human_value(details.get('provider'))}/{_human_value(details.get('model'))}; содержимое не журналируется."
+        return f"Отправлен запрос LLM {details.get('request_id', '')}: {_human_value(details.get('provider'))}/{_human_value(details.get('model'))}; полный запрос сохранён в events.jsonl."
     if event == "llm_response":
         return f"Получен ответ LLM {details.get('request_id', '')}; списано токенов={_human_value(details.get('charged_tokens'))}."
     if event == "llm_error":
@@ -467,7 +470,7 @@ def _event_text(event: str, details: dict) -> str:
     if event == "context_compacted":
         return f"Сокращён контекст запроса: {_human_value(details.get('reason'))}."
     if event == "tool_call":
-        return f"LLM вызвала инструмент {details.get('name', 'unknown')} ({details.get('call_id', '')}); аргументы опущены."
+        return f"LLM вызвала инструмент {details.get('name', 'unknown')} ({details.get('call_id', '')}); полные аргументы сохранены в events.jsonl."
     if event == "tool_result":
         status = "успешно" if details.get("ok") else "с ошибкой"
         code = f", код={details['error_code']}" if details.get("error_code") else ""
@@ -479,6 +482,9 @@ def _event_text(event: str, details: dict) -> str:
         chain = _model_chain(details.get("model_details"))
         if chain:
             result += f"; фактическая цепочка модели: {chain}"
+        fallback = _get_nested(details.get("model_details"), "fallback_reason")
+        if fallback:
+            result += f"; причина перехода на запасную модель: {_human_value(fallback)}"
         if details.get("error_code"):
             result += f"; код ошибки={details['error_code']}"
         return result + "."

@@ -1,0 +1,15 @@
+{
+  "phase": "green",
+  "command": [
+    ".venv/bin/python",
+    "-m",
+    "pytest",
+    "-q",
+    "--tb=short"
+  ],
+  "cwd": "/Users/egoraprelsky/Desktop/coding/alfa_hackathon",
+  "started_at_utc": "2026-10-19T20:08:35.559756+00:00",
+  "returncode": 1,
+  "output": "F....................................................................... [ 84%]\n.............                                                            [100%]\n=================================== FAILURES ===================================\n________ test_fake_openai_cli_recovers_from_bad_experiment_and_finishes ________\ntests/test_acceptance.py:248: in test_fake_openai_cli_recovers_from_bad_experiment_and_finishes\n    assert recovered_call is not None, \"journal must retain the repaired hypothesis/tool call\"\nE   AssertionError: journal must retain the repaired hypothesis/tool call\nE   assert None is not None\n=========================== short test summary info ============================\nFAILED tests/test_acceptance.py::test_fake_openai_cli_recovers_from_bad_experiment_and_finishes\n1 failed, 84 passed in 25.00s\n",
+  "seconds": 25.179
+}

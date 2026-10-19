@@ -55,7 +55,7 @@ class ResearchRun:
     def __init__(self, config):
         initialized_at = time.monotonic()
         from .data import discover_task
-        from .journal import EventJournal
+        from .audit import AuditJournal
         from .runtime import Budget
 
         self.config = config
@@ -75,7 +75,7 @@ class ResearchRun:
         self.signature = hashlib.sha256(json.dumps(signature, sort_keys=True).encode()).hexdigest()
         if self.state and self.state.get("settings_fingerprint") != self.signature:
             raise ValueError("Input data or split settings changed (fingerprint mismatch); start a new run")
-        self.journal = EventJournal(self.directory / "events.jsonl", secrets=[config.api_key] if config.api_key else [])
+        self.journal = AuditJournal(self.directory / "events.jsonl", secrets=[config.api_key] if config.api_key else [])
         self.results = []
         # The event log is authoritative if the process died before state.json was updated.
         completed = {r["trial_id"]: r for r in self.state.get("trials", [])}
@@ -142,7 +142,7 @@ class ResearchRun:
         for event in events:
             if event.get("event") == "trial_started" and event.get("trial_id") not in finished:
                 trial_id = event["trial_id"]
-                result = ExperimentResult(trial_id, "interrupted", str(self.directory / trial_id), event.get("code_hash", ""), event.get("hypothesis", ""), error="Outcome unknown after interrupted process; not replayed")
+                result = ExperimentResult(trial_id, "interrupted", str(self.directory / trial_id), event.get("code_hash", ""), event.get("hypothesis", ""), error="Outcome unknown after interrupted process; not replayed", is_baseline=event.get("is_baseline", False), decision=event.get("decision", {}))
                 self.results.append(result)
                 self.journal.append("trial_completed", result=result.to_dict())
                 finished.add(trial_id)
@@ -237,11 +237,12 @@ class ResearchRun:
         indices = [int(p.name.split("_")[1]) for p in self.directory.glob("trial_*") if p.is_dir() and p.name.split("_")[1].isdigit()]
         return f"trial_{max(indices, default=0) + 1:04d}"
 
-    def experiment(self, hypothesis, code, is_baseline=False):
+    def experiment(self, hypothesis, code, is_baseline=False, decision=None):
         from .evaluation import publish_submission, score_trial
         from .journal import atomic_write_json
         from .runtime import run_process
         from .tools import validate_candidate_code
+        from .strategy import assess_experiment
 
         if len(self.results) >= self.config.max_trials:
             raise ValueError("Experiment budget exhausted")
@@ -255,8 +256,15 @@ class ResearchRun:
         directory = self.directory / trial_id
         directory.mkdir()
         (directory / "code.py").write_text(code, encoding="utf-8")
-        result = ExperimentResult(trial_id, "error", str(directory), code_hash, hypothesis, is_baseline=is_baseline)
-        self.journal.append("trial_started", trial_id=trial_id, code_hash=code_hash, hypothesis=hypothesis, is_baseline=is_baseline)
+        previous_best = select_best(self.results, self.task.maximize)
+        result = ExperimentResult(trial_id, "error", str(directory), code_hash, hypothesis, is_baseline=is_baseline, decision=decision or {})
+        explanation = {"trial_id": trial_id, "source": "harness" if is_baseline else "llm", "hypothesis": hypothesis,
+                       "decision": result.decision, "explanation_provided": bool(result.decision)}
+        # Persist the public explanation before running untrusted candidate code.
+        recorded = self.journal.append("decision_recorded", **explanation)
+        result.decision = recorded["payload"]["decision"]
+        atomic_write_json(directory / "decision.json", recorded["payload"])
+        self.journal.append("trial_started", trial_id=trial_id, code_hash=code_hash, hypothesis=hypothesis, is_baseline=is_baseline, decision=result.decision)
         self.checkpoint()
         try:
             validate_candidate_code(code)
@@ -271,6 +279,7 @@ class ResearchRun:
             result.seconds = process.seconds
             result.status = process.status
             if process.status == "ok":
+                result.model_details = _read_json(directory / "worker_result.json", {}).get("estimator_details", {})
                 result.metrics = score_trial(self.task, self.split, directory)
                 result.metric = float(result.metrics[self.task.metric])
                 if not math.isfinite(result.metric):
@@ -289,41 +298,43 @@ class ResearchRun:
             result.error = f"{type(exc).__name__}: {exc}"[-4000:]
         self.results.append(result)
         self.journal.append("trial_completed", result=result.to_dict())
+        self.journal.append("experiment_assessed", **assess_experiment(result, previous_best, self.task.maximize, self.task.metric))
         best = select_best(self.results, self.task.maximize)
         if best is result:
             publish_submission(self.task, Path(result.prediction_path), self.output)
             self.journal.append("candidate_selected", trial_id=trial_id, metric=result.metric, submission_path=str(self.output))
         self.checkpoint()
-        print(f"{trial_id}: {result.status}, {self.task.metric}={result.metric}", file=sys.stderr, flush=True)
         if result.status == "cancelled":
             raise KeyboardInterrupt
         return result
 
-    def _llm_experiment(self, hypothesis, code):
-        result = self.experiment(hypothesis, code)
+    def _llm_experiment(self, hypothesis, code, decision=None):
+        result = self.experiment(hypothesis, code, decision=decision)
         if result.status != "ok":
             raise ValueError(f"{result.trial_id} {result.status}: {result.error}")
         best = select_best(self.results, self.task.maximize)
         return {"trial_id": result.trial_id, "metrics": result.metrics, "seconds": result.seconds,
-                "selected": best.trial_id == result.trial_id, "best_metric": best.metric}
+                "selected": best.trial_id == result.trial_id, "best_metric": best.metric, "model_details": result.model_details}
 
     def _finish(self, reason):
         if not any(r.status == "ok" and not r.is_baseline for r in self.results):
             raise ValueError("Run at least one successful generated experiment before finishing")
         self.finish_requested = True
         self.stop_reason = "model_finished"
+        self.journal.append("research_finished", source="llm", reason=reason)
         return {"finished": True, "reason": reason}
 
     def research(self):
         from .prompts import build_messages
         from .providers import OllamaProvider, OpenAICompatibleProvider, ProviderError
         from .tools import ToolRegistry
+        from .strategy import DECISION_SCHEMA
 
         provider_type = OllamaProvider if self.config.provider == "ollama" else OpenAICompatibleProvider
         provider = provider_type(base_url=self.config.base_url, api_key=self.config.api_key, model=self.config.model, extra_body=self.config.extra_body)
         registry = ToolRegistry()
         registry.register("run_experiment", "Test a concrete ML hypothesis with complete build_model(context) Python source.",
-                          {"type": "object", "properties": {"hypothesis": {"type": "string", "minLength": 1, "maxLength": 6000}, "code": {"type": "string", "minLength": 1, "maxLength": 64000}}, "required": ["hypothesis", "code"], "additionalProperties": False}, self._llm_experiment)
+                          {"type": "object", "properties": {"hypothesis": {"type": "string", "minLength": 1, "maxLength": 6000}, "code": {"type": "string", "minLength": 1, "maxLength": 64000}, "decision": DECISION_SCHEMA}, "required": ["hypothesis", "code"], "additionalProperties": False}, self._llm_experiment)
         registry.register("finish_research", "Stop research after a successful generated candidate; host refits the best model.",
                           {"type": "object", "properties": {"reason": {"type": "string", "minLength": 1, "maxLength": 4000}}, "required": ["reason"], "additionalProperties": False}, self._finish)
         for request_id, response in self.pending_responses:
@@ -351,7 +362,6 @@ class ResearchRun:
             if available_tokens < 128:
                 if not compact:
                     compact = True
-                    self.recent_steps.clear()
                     self.journal.append("context_compacted", reason="token_budget_admission")
                     continue
                 self.stop_reason = "token_budget"
@@ -371,7 +381,6 @@ class ResearchRun:
                 self.journal.append("llm_error", request_id=request_id, code=exc.code, error=str(exc), charged_tokens=charged)
                 if exc.code in {"context_overflow", "CONTEXT_WINDOW_EXCEEDED", "context_length_exceeded"} and not compact:
                     compact = True
-                    self.recent_steps.clear()
                     self.feedback = "Context overflow: the host reduced auxiliary context. Return one compact tool call."
                     self.journal.append("context_compacted", reason="provider_context_overflow")
                     continue
@@ -385,6 +394,7 @@ class ResearchRun:
             self.stop_reason = "max_steps"
         if len(self.results) >= self.config.max_trials:
             self.stop_reason = "max_trials"
+        self.journal.append("research_stopped", reason=self.stop_reason, total_tokens=self.tokens_used, elapsed_seconds=round(self.budget.elapsed(), 3))
 
     def finalize(self, best):
         from .evaluation import publish_submission
@@ -411,6 +421,7 @@ class ResearchRun:
         if process.status == "ok":
             try:
                 publish_submission(self.task, directory / "test_predictions.csv", self.output)
+                outcome["model_details"] = _read_json(directory / "worker_result.json", {}).get("estimator_details", {})
                 outcome["model_path"] = str(directory / "model.joblib") if (directory / "model.joblib").exists() else None
             except Exception as exc:
                 outcome.update(status="invalid_output", error=str(exc))
@@ -426,6 +437,7 @@ class ResearchRun:
         from .evaluation import validate_submission
         from .journal import atomic_write_json
         from .modeling import baseline_code
+        from .strategy import baseline_decision, plan_research
 
         if self.config.resume and not self.state.get("active") and (self.directory / "report.json").exists():
             validate_submission(self.task, self.output)
@@ -442,16 +454,25 @@ class ResearchRun:
         atomic_write_json(self.directory / "environment.json", {"python": sys.version, "platform": platform.platform(), "packages": versions})
         self.profile = profile_task(self.task)
         self.profile["available_packages"] = versions
+        strategy = plan_research(self.task, self.profile, self.config)
+        self.profile["research_strategy"] = strategy
+        atomic_write_json(self.directory / "strategy.json", strategy)
+        self.journal.append("data_profiled", summary={**strategy["facts"], "task_type": self.task.task_type, "metric": self.task.metric,
+                                                   "target": self.task.target, "test_rows": self.profile["test_shape"][0]})
+        self.journal.append("research_strategy", strategy=strategy)
         atomic_write_json(self.directory / "profile.json", self.profile)
         self.split = prepare_split(self.task, self.directory)
         atomic_write_json(self.directory / "split_manifest.json", self.split)
+        self.journal.append("validation_planned", summary={"seed": self.task.seed, "fraction": self.task.validation_fraction,
+                            "manifest_path": str(self.directory / "split_manifest.json"), "split_fingerprint": self.split["split_fingerprint"],
+                            "policy": "Фиксированный случайный holdout; labels доступны только host-оценщику. Один split для всех опытов."})
         self._emergency_submission()
         if self.config.resume:
             self._restore_best_submission()
         self.checkpoint()
         try:
             if not self.results and self.budget.research_remaining() > 0:
-                self.experiment("Reliable baseline before LLM research", baseline_code(self.task, n_jobs=self.config.n_jobs), is_baseline=True)
+                self.experiment("Проверить надёжный baseline перед LLM-исследованием", baseline_code(self.task, n_jobs=self.config.n_jobs), is_baseline=True, decision=baseline_decision(strategy))
             if not self.config.offline:
                 self.research()
             best = select_best(self.results, self.task.maximize)
@@ -467,17 +488,22 @@ class ResearchRun:
             best = select_best(self.results, self.task.maximize)
             final_fit = {"status": "skipped", "reason": str(exc)}
         validation = validate_submission(self.task, self.output)
+        self.journal.append("submission_validated", validation=validation, submission_path=str(self.output))
         llm_trials = sum(r.status == "ok" and not r.is_baseline for r in self.results)
         status = "offline" if self.config.offline else ("completed" if llm_trials else "degraded")
         report = {"status": status, "stop_reason": self.stop_reason, "task_type": self.task.task_type, "metric": self.task.metric,
                   "best_metric": best.metric if best else None, "selected_trial": best.trial_id if best else None,
                   "trials": [r.to_dict() for r in self.results], "llm_calls": self.steps, "llm_trials": llm_trials,
                   "total_tokens": self.tokens_used, "elapsed_seconds": round(self.budget.elapsed(), 3),
-                  "submission_path": str(self.output), "run_dir": str(self.directory), "final_fit": final_fit, "validation": validation}
+                  "submission_path": str(self.output), "run_dir": str(self.directory), "final_fit": final_fit, "validation": validation,
+                  "decision_log": str(self.directory / "agent.log"), "decisions_path": str(self.directory / "decisions.jsonl")}
         atomic_write_json(self.directory / "report.json", report)
         rows = ["# AutoResearch run", "", f"Status: {status}; stop: {self.stop_reason}", f"Metric: {self.task.metric}; best validation: {report['best_metric']}",
-                f"Submission: {self.output}", "", "| Trial | Status | Validation metric | Seconds |", "|---|---|---:|---:|"]
+                f"Submission: {self.output}", f"Decision log: {self.directory / 'agent.log'}", f"Structured decisions: {self.directory / 'decisions.jsonl'}", "", "| Trial | Status | Validation metric | Seconds |", "|---|---|---:|---:|"]
         rows += [f"| {r.trial_id} | {r.status} | {r.metric} | {r.seconds:.2f} |" for r in self.results]
+        for result in self.results:
+            rows += ["", f"## {result.trial_id}: {result.hypothesis}", f"Decision: {Path(result.artifact_dir) / 'decision.json'}",
+                     f"Actual estimator: {' → '.join(result.model_details.get('estimator_chain', [])) or 'not recorded'}"]
         rows += ["", "The validation metric belongs to the fixed holdout experiment. The final refit uses all training rows.",
                  "Generated code runs in a supervised subprocess. Use the deployment container for OS-level filesystem/network isolation."]
         (self.directory / "report.md").write_text("\n".join(rows) + "\n", encoding="utf-8")

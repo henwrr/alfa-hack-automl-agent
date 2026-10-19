@@ -1,0 +1,18 @@
+{
+  "phase": "red",
+  "command": [
+    ".venv/bin/python",
+    "-m",
+    "pytest",
+    "tests/test_decisions.py",
+    "-k",
+    "fallback",
+    "-q",
+    "--tb=short"
+  ],
+  "cwd": "/Users/egoraprelsky/Desktop/coding/alfa_hackathon",
+  "started_at_utc": "2026-10-19T20:10:15.556478+00:00",
+  "returncode": 1,
+  "output": "F                                                                        [100%]\n=================================== FAILURES ===================================\n________ test_baseline_fallback_records_failure_and_estimator_backbone _________\ntests/test_decisions.py:161: in test_baseline_fallback_records_failure_and_estimator_backbone\n    assert details.get('fallback_reason') == 'TypeError: synthetic CatBoost parameter failure'\nE   AssertionError: assert None == 'TypeError: synthetic CatBoost parameter failure'\nE    +  where None = <built-in method get of dict object at 0x12c1a7540>('fallback_reason')\nE    +    where <built-in method get of dict object at 0x12c1a7540> = {'class': 'builtins._AdaptiveModel', 'estimator_chain': ['builtins._AdaptiveModel', 'sklearn.pipeline.Pipeline', 'skle...ColumnTransformer', 'name': 'preprocess'}, {'class': 'sklearn.ensemble._forest.ExtraTreesRegressor', 'name': 'model'}]}.get\n=========================== short test summary info ============================\nFAILED tests/test_decisions.py::test_baseline_fallback_records_failure_and_estimator_backbone\n1 failed, 10 deselected in 1.24s\n",
+  "seconds": 1.488
+}

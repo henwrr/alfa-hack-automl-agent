@@ -40,8 +40,11 @@ class _AdaptiveModel:
         self.kind = self.context.get("task_type", "regression")
         self.model = None
         self._catboost = False
+        self.fallback_reason = None
 
     def fit(self, X, y):
+        self.fallback_reason = None
+        self._catboost = False
         frame, categories, numeric = _clean_frame(X, self.categories)
         self.categories = categories
         self.feature_names_in_ = list(frame.columns)
@@ -62,12 +65,14 @@ class _AdaptiveModel:
                 self.model = klass(**params)
                 self.model.fit(frame, y, cat_features=categories)
                 self._catboost = True
-            except Exception:
+            except Exception as exc:
+                self.fallback_reason = ("CatBoost: " + str(exc))[:1000]
                 # Keep the baseline usable when a particular CatBoost build or
                 # fold cannot represent the observed target/category shape.
                 self.model = self._make_sklearn(frame, categories, numeric)
                 self.model.fit(frame, y)
-        except ImportError:
+        except ImportError as exc:
+            self.fallback_reason = ("CatBoost: " + str(exc))[:1000]
             self.model = self._make_sklearn(frame, categories, numeric)
             self.model.fit(frame, y)
         return self

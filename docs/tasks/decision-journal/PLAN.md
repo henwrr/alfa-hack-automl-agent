@@ -3,9 +3,9 @@
 | Шаг | Зависимости | Файлы | Исполнитель / worktree | Проверка | Статус |
 |---|---|---|---|---|---|
 | Спецификация и baseline | — | docs/tasks/decision-journal | root | pytest baseline | выполнено |
-| Проекции журнала и live вывод | спецификация | automl_agent/audit.py, tests/test_audit.py | Luna xhigh / decision-audit | red → green, секреты, resume | запланировано |
-| Метаданные реальной модели | спецификация | automl_agent/worker.py, tests/test_model_metadata.py | Luna xhigh / decision-model-metadata | red → green, wrapper/pipeline | запланировано |
-| Стратегия и объяснения LLM | спецификация | strategy.py, agent.py, contracts.py, prompts.py, tests/test_decisions.py | root | red → green интеграция | запланировано |
+| Проекции журнала и live вывод | спецификация | automl_agent/audit.py, tests/test_audit.py | Luna xhigh / decision-audit | red → green, секреты, resume | интегрировано 1aab4da |
+| Метаданные реальной модели | спецификация | automl_agent/worker.py, tests/test_model_metadata.py | Luna xhigh / decision-model-metadata | red → green, wrapper/pipeline | интегрировано 361c694; уточнения root |
+| Стратегия и объяснения LLM | спецификация | strategy.py, agent.py, contracts.py, prompts.py, tests/test_decisions.py | root | red → green интеграция | реализовано, финальные проверки |
 | Интеграция и документация | все компоненты | README.md, docs/RESEARCH_STRATEGY.md, task docs | root | полный suite, Ollama, ZIP | запланировано |
 
 ## Базовый коммит

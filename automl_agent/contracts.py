@@ -62,6 +62,8 @@ class ExperimentResult:
     is_baseline: bool = False
     prediction_path: str | None = None
     model_path: str | None = None
+    decision: dict[str, Any] = field(default_factory=dict)
+    model_details: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
