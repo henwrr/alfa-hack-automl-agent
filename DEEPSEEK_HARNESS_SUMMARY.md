@@ -112,6 +112,21 @@ autoresearch/
 
 ## Ключевые первоисточники
 
+## Выжимка второго исследования: надёжность исполнения
+
+Полное независимое исследование: [DEEPSEEK_HARNESS_RELIABILITY.md](docs/research/DEEPSEEK_HARNESS_RELIABILITY.md). Оркестратор прочитал оба исследования и сверил ключевые границы с upstream-кодом.
+
+- Runtime отделяет исполнение от агента и завершает управляемые процессы при отмене. В Python MVP переносим отдельные процессы и управление process group; у каждого вызова есть более короткий timeout внутри общего трёхчасового дедлайна.
+- Вывод ограничивается при чтении, а не после накопления в памяти. Бесконечная печать должна давать структурированный `output_limit`, не исчерпывать память host.
+- Retry модели и повтор эксперимента различаются: только временные API-сбои допускают конечный backoff. Python exception возвращается LLM для осмысленной коррекции; незавершённая после crash попытка не перезапускается вслепую.
+- Checkpoint сохраняет intent до внешнего эффекта и result до следующего шага. JSONL сам по себе не гарантирует exactly-once; для trial нужны уникальные IDs и проверка артефактов при resume.
+- Канонический ML-score считает host на фиксированном validation-target; самооценка модели или поле score из её stdout не участвуют в выборе победителя. Перед публикацией CSV проверяется независимо и записывается атомарно.
+- Изолированный subprocess и очищенное env не равны полноценному sandbox. В MVP явно описываются границы: внешнее Docker/OS окружение отвечает за жёсткую изоляцию файлов/сети и совокупный лимит ресурсов; supervisor — за timeouts, процессные группы, RSS/вывод и корректное завершение.
+
+Для MVP эти меры включаются вместе с архитектурными контрактами. Полная плагинная среда DeepSeek не переносится; используется самостоятельная Python-реализация идей без копирования upstream-кода.
+
+### Ссылки на архитектуру
+
 - [README.md](https://github.com/deepseek-ai/deepseek-harness/blob/687f282e8625c6b8d11ff58211a90524be2e4317/README.md) — назначение, plugin architecture, preview и ссылки на архитектуру.
 - [`packages/core/agent-loop`](https://github.com/deepseek-ai/deepseek-harness/tree/687f282e8625c6b8d11ff58211a90524be2e4317/packages/core/agent-loop) — README и код turn/step.
 - [`packages/core/tools`](https://github.com/deepseek-ai/deepseek-harness/tree/687f282e8625c6b8d11ff58211a90524be2e4317/packages/core/tools) — schemas, registry, execution lifecycle.
