@@ -6,6 +6,7 @@ import argparse
 import importlib.util
 import itertools
 import json
+import math
 import os
 import sys
 import tempfile
@@ -30,6 +31,11 @@ _ESTIMATOR_LINKS = (
     "model", "_model", "_estimator", "estimator", "base_estimator_",
     "base_estimator", "final_estimator",
 )
+_NATIVE_PARAMETER_TYPES: dict[type, tuple[str, tuple[str, ...], Any]] | None = None
+_MAX_PARAMETER_LIST_ITEMS = 64
+_MAX_PARAMETER_STRING_LENGTH = 160
+_MAX_PARAMETER_NUMBER = 1_000_000_000_000
+_UNSAFE_PARAMETER = object()
 
 
 def _class_name(value: Any) -> str:
@@ -108,6 +114,128 @@ def _linked_estimators(value: Any) -> list[Any]:
     return []
 
 
+def _capture_native_parameter_types() -> dict[type, tuple[str, tuple[str, ...], Any]]:
+    """Capture exact supported native classes and CatBoost's original getter.
+
+    The worker calls this before importing candidate code. That lets metadata
+    recognize the real classes by identity and avoids trusting methods or
+    module attributes that candidate code might replace later.
+    """
+    global _NATIVE_PARAMETER_TYPES
+    if _NATIVE_PARAMETER_TYPES is not None:
+        return _NATIVE_PARAMETER_TYPES
+
+    known: dict[type, tuple[str, tuple[str, ...], Any]] = {}
+    catboost_fields = (
+        "iterations", "learning_rate", "depth", "l2_leaf_reg", "border_count",
+        "auto_class_weights", "class_weights",
+    )
+    try:
+        import catboost
+
+        package_values = vars(catboost)
+        for class_name in ("CatBoostClassifier", "CatBoostRegressor"):
+            estimator_class = package_values.get(class_name)
+            if not isinstance(estimator_class, type):
+                continue
+            try:
+                get_all_params = type.__getattribute__(estimator_class, "get_all_params")
+            except Exception:
+                continue
+            known[estimator_class] = ("catboost", catboost_fields, get_all_params)
+    except Exception:
+        pass
+
+    sklearn_tree_fields = (
+        "n_estimators", "max_depth", "max_leaf_nodes", "min_samples_leaf",
+        "max_features", "class_weight", "n_jobs",
+    )
+    sklearn_linear_fields = ("C", "max_iter", "solver", "class_weight", "n_jobs")
+    try:
+        from sklearn.ensemble import ExtraTreesClassifier, ExtraTreesRegressor
+        from sklearn.linear_model import LogisticRegression
+
+        for estimator_class in (ExtraTreesClassifier, ExtraTreesRegressor):
+            known[estimator_class] = ("sklearn", sklearn_tree_fields, None)
+        known[LogisticRegression] = ("sklearn", sklearn_linear_fields, None)
+    except Exception:
+        pass
+
+    _NATIVE_PARAMETER_TYPES = known
+    return known
+
+
+def _bounded_parameter_value(value: Any, name: str) -> Any:
+    """Convert expected native parameter values to bounded JSON primitives."""
+    if value is None or type(value) in (bool, int, str):
+        if type(value) is int and abs(value) > _MAX_PARAMETER_NUMBER:
+            return _UNSAFE_PARAMETER
+        if type(value) is str:
+            return value[:_MAX_PARAMETER_STRING_LENGTH]
+        return value
+    if type(value) is float:
+        if not math.isfinite(value) or abs(value) > _MAX_PARAMETER_NUMBER:
+            return _UNSAFE_PARAMETER
+        return value
+    if type(value) in (list, tuple):
+        iterator = list.__iter__(value) if type(value) is list else tuple.__iter__(value)
+        result = []
+        for item in itertools.islice(iterator, _MAX_PARAMETER_LIST_ITEMS):
+            safe_item = _bounded_parameter_value(item, name)
+            if safe_item is _UNSAFE_PARAMETER:
+                return _UNSAFE_PARAMETER
+            result.append(safe_item)
+        return result
+    if type(value) is dict and name in ("class_weight", "class_weights"):
+        # Mapping keys are class labels (target values), so retain only bounded
+        # numeric weights and explicitly omit the labels.
+        weights = []
+        for _, item in itertools.islice(dict.items(value), _MAX_PARAMETER_LIST_ITEMS):
+            safe_item = _bounded_parameter_value(item, name)
+            if type(safe_item) not in (int, float) or type(safe_item) is bool:
+                return _UNSAFE_PARAMETER
+            weights.append(safe_item)
+        return {"weights": weights, "class_labels_omitted": True}
+    return _UNSAFE_PARAMETER
+
+
+def _realized_parameters(value: Any) -> tuple[dict[str, Any], str]:
+    """Return whitelisted parameters for one exact supported estimator class."""
+    native = _capture_native_parameter_types().get(type(value))
+    if native is None:
+        return {}, "unsupported_estimator"
+
+    family, fields, getter = native
+    try:
+        if family == "catboost":
+            raw = getter(value)
+            if type(raw) is not dict:
+                return {}, "catboost.get_all_params_unavailable"
+            result = {}
+            for name in fields:
+                raw_value = dict.get(raw, name)
+                safe_value = _bounded_parameter_value(raw_value, name)
+                if safe_value is not _UNSAFE_PARAMETER:
+                    result[name] = safe_value
+            return result, "catboost.get_all_params"
+
+        attributes = _instance_dict(value)
+        if type(attributes) is not dict:
+            return {}, "sklearn.constructor_params_unavailable"
+        result = {}
+        for name in fields:
+            if name not in attributes:
+                continue
+            safe_value = _bounded_parameter_value(attributes[name], name)
+            if safe_value is not _UNSAFE_PARAMETER:
+                result[name] = safe_value
+        return result, "sklearn.constructor_params"
+    except Exception:
+        # Metadata is best-effort and must not interfere with model evaluation.
+        source = "catboost.get_all_params_unavailable" if family == "catboost" else "sklearn.constructor_params_unavailable"
+        return {}, source
+
+
 def _estimator_details(estimator: Any) -> dict[str, Any]:
     """Describe a fitted estimator graph using only bounded, known links.
 
@@ -118,6 +246,8 @@ def _estimator_details(estimator: Any) -> dict[str, Any]:
     root_class = _class_name(estimator)
     chain: list[str] = []
     pipeline_steps: list[dict[str, str]] = []
+    realized_parameters: dict[str, Any] = {}
+    parameters_source = "unsupported_estimator"
     seen: set[int] = set()
     pending: list[tuple[Any, int]] = [(estimator, 0)]
     try:
@@ -129,6 +259,10 @@ def _estimator_details(estimator: Any) -> dict[str, Any]:
             seen.add(identity)
             current_class = _class_name(current)
             chain.append(current_class)
+            current_parameters, current_source = _realized_parameters(current)
+            if current_source != "unsupported_estimator":
+                realized_parameters = current_parameters
+                parameters_source = current_source
             if depth >= _MAX_ESTIMATOR_DEPTH:
                 continue
 
@@ -152,6 +286,8 @@ def _estimator_details(estimator: Any) -> dict[str, Any]:
         "class": root_class,
         "estimator_chain": chain[:_MAX_ESTIMATOR_COUNT] or [root_class],
         "pipeline_steps": pipeline_steps[:_MAX_ESTIMATOR_COUNT],
+        "parameters": realized_parameters,
+        "parameters_source": parameters_source,
     }
     fallback = _instance_dict(estimator).get("fallback_reason")
     if isinstance(fallback, str) and fallback:
@@ -269,6 +405,7 @@ def _run_manifest(manifest_path: Path) -> dict:
     if mode == "evaluate":
         validation_x = _load_features(inputs["validation_features"], columns, categorical)
     test_x = _load_features(inputs["test_features"], columns, categorical)
+    _capture_native_parameter_types()
     _, builder = _load_model(Path(manifest["code_path"]).expanduser().resolve())
     model = builder(context)
     if not callable(getattr(model, "fit", None)) or not callable(getattr(model, "predict", None)):

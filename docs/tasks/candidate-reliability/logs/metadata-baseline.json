@@ -1,0 +1,6 @@
+{
+  "phase": "baseline",
+  "command": "/Users/egoraprelsky/Desktop/coding/alfa_hackathon/.venv/bin/python -m pytest tests/test_model_metadata.py tests/test_worker.py -q",
+  "exit_code": 0,
+  "result": "9 passed in 5.17s"
+}
