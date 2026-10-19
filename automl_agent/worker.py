@@ -32,6 +32,7 @@ _ESTIMATOR_LINKS = (
     "base_estimator", "final_estimator",
 )
 _NATIVE_PARAMETER_TYPES: dict[type, tuple[str, tuple[str, ...], Any]] | None = None
+_MAX_PARAMETER_DEPTH = 1
 _MAX_PARAMETER_LIST_ITEMS = 64
 _MAX_PARAMETER_STRING_LENGTH = 160
 _MAX_PARAMETER_NUMBER = 1_000_000_000_000
@@ -151,13 +152,15 @@ def _capture_native_parameter_types() -> dict[type, tuple[str, tuple[str, ...], 
         "max_features", "class_weight", "n_jobs",
     )
     sklearn_linear_fields = ("C", "max_iter", "solver", "class_weight", "n_jobs")
+    sklearn_regression_fields = ("n_jobs", "fit_intercept", "positive")
     try:
         from sklearn.ensemble import ExtraTreesClassifier, ExtraTreesRegressor
-        from sklearn.linear_model import LogisticRegression
+        from sklearn.linear_model import LinearRegression, LogisticRegression
 
         for estimator_class in (ExtraTreesClassifier, ExtraTreesRegressor):
             known[estimator_class] = ("sklearn", sklearn_tree_fields, None)
         known[LogisticRegression] = ("sklearn", sklearn_linear_fields, None)
+        known[LinearRegression] = ("sklearn", sklearn_regression_fields, None)
     except Exception:
         pass
 
@@ -165,7 +168,7 @@ def _capture_native_parameter_types() -> dict[type, tuple[str, tuple[str, ...], 
     return known
 
 
-def _bounded_parameter_value(value: Any, name: str) -> Any:
+def _bounded_parameter_value(value: Any, name: str, depth: int = 0) -> Any:
     """Convert expected native parameter values to bounded JSON primitives."""
     if value is None or type(value) in (bool, int, str):
         if type(value) is int and abs(value) > _MAX_PARAMETER_NUMBER:
@@ -177,11 +180,13 @@ def _bounded_parameter_value(value: Any, name: str) -> Any:
         if not math.isfinite(value) or abs(value) > _MAX_PARAMETER_NUMBER:
             return _UNSAFE_PARAMETER
         return value
+    if type(value) in (list, tuple, dict) and depth >= _MAX_PARAMETER_DEPTH:
+        return _UNSAFE_PARAMETER
     if type(value) in (list, tuple):
         iterator = list.__iter__(value) if type(value) is list else tuple.__iter__(value)
         result = []
         for item in itertools.islice(iterator, _MAX_PARAMETER_LIST_ITEMS):
-            safe_item = _bounded_parameter_value(item, name)
+            safe_item = _bounded_parameter_value(item, name, depth + 1)
             if safe_item is _UNSAFE_PARAMETER:
                 return _UNSAFE_PARAMETER
             result.append(safe_item)
@@ -191,7 +196,7 @@ def _bounded_parameter_value(value: Any, name: str) -> Any:
         # numeric weights and explicitly omit the labels.
         weights = []
         for _, item in itertools.islice(dict.items(value), _MAX_PARAMETER_LIST_ITEMS):
-            safe_item = _bounded_parameter_value(item, name)
+            safe_item = _bounded_parameter_value(item, name, depth + 1)
             if type(safe_item) not in (int, float) or type(safe_item) is bool:
                 return _UNSAFE_PARAMETER
             weights.append(safe_item)
@@ -213,11 +218,28 @@ def _realized_parameters(value: Any) -> tuple[dict[str, Any], str]:
                 return {}, "catboost.get_all_params_unavailable"
             result = {}
             for name in fields:
-                raw_value = dict.get(raw, name)
+                if not dict.__contains__(raw, name):
+                    continue
+                raw_value = dict.__getitem__(raw, name)
                 safe_value = _bounded_parameter_value(raw_value, name)
                 if safe_value is not _UNSAFE_PARAMETER:
                     result[name] = safe_value
-            return result, "catboost.get_all_params"
+
+            source = "catboost.get_all_params"
+            native_thread_count = dict.get(raw, "thread_count")
+            thread_count_source = source
+            if native_thread_count is None:
+                init_params = _instance_dict(value).get("_init_params")
+                if type(init_params) is dict and dict.__contains__(init_params, "thread_count"):
+                    native_thread_count = dict.__getitem__(init_params, "thread_count")
+                    thread_count_source = "catboost._init_params"
+            if native_thread_count is not None:
+                safe_thread_count = _bounded_parameter_value(native_thread_count, "thread_count")
+                if safe_thread_count is not _UNSAFE_PARAMETER:
+                    result["thread_count"] = safe_thread_count
+                    if thread_count_source != source:
+                        source += ";thread_count=" + thread_count_source
+            return result, source
 
         attributes = _instance_dict(value)
         if type(attributes) is not dict:

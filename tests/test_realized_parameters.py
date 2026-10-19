@@ -12,7 +12,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from automl_agent.worker import _estimator_details
+from automl_agent import worker as worker_module
+from automl_agent.worker import (
+    _UNSAFE_PARAMETER,
+    _bounded_parameter_value,
+    _estimator_details,
+)
 
 
 WORKTREE = Path(__file__).resolve().parents[1]
@@ -42,7 +47,7 @@ def test_fitted_catboost_reports_bounded_real_auto_parameters():
     actual = model.get_all_params()
     parameters = details["parameters"]
 
-    assert details["parameters_source"] == "catboost.get_all_params"
+    assert details["parameters_source"].startswith("catboost.get_all_params")
     assert parameters["iterations"] == actual["iterations"] == 5
     assert parameters["learning_rate"] == actual["learning_rate"]
     assert parameters["depth"] == actual["depth"]
@@ -51,6 +56,10 @@ def test_fitted_catboost_reports_bounded_real_auto_parameters():
     assert parameters["auto_class_weights"] == actual["auto_class_weights"] == "Balanced"
     assert parameters["class_weights"] == actual["class_weights"]
     assert parameters["class_weights"] is not None
+    assert parameters["thread_count"] == 1
+    assert "thread_count=catboost._init_params" in details["parameters_source"]
+    assert "thread_count" not in actual
+    assert model.__dict__["_init_params"]["thread_count"] == 1
     assert len(parameters) <= 8
     assert "rare" not in json.dumps(parameters)
     assert "common" not in json.dumps(parameters)
@@ -119,6 +128,52 @@ def test_fitted_linear_parameters_include_solver_and_thread_count(monkeypatch):
         "class_weight": "balanced",
         "n_jobs": 2,
     }
+
+
+def test_fitted_linear_regression_reports_safe_constructor_fields():
+    from sklearn.linear_model import LinearRegression
+
+    model = LinearRegression(
+        n_jobs=2,
+        fit_intercept=False,
+        positive=True,
+    ).fit(np.arange(12, dtype=float).reshape(-1, 1), np.arange(12, dtype=float))
+    details = _estimator_details(model)
+
+    assert details["parameters_source"] == "sklearn.constructor_params"
+    assert details["parameters"] == {
+        "n_jobs": 2,
+        "fit_intercept": False,
+        "positive": True,
+    }
+
+
+def test_nested_and_cyclic_parameter_containers_are_rejected():
+    nested = [1.0]
+    for _ in range(20):
+        nested = [nested]
+    cyclic = []
+    cyclic.append(cyclic)
+
+    assert _bounded_parameter_value(nested, "class_weights") is _UNSAFE_PARAMETER
+    assert _bounded_parameter_value(cyclic, "class_weights") is _UNSAFE_PARAMETER
+
+
+def test_catboost_omits_parameters_absent_from_native_api(monkeypatch):
+    catboost = pytest.importorskip("catboost")
+    estimator_class = catboost.CatBoostClassifier
+    registry = worker_module._capture_native_parameter_types()
+    family, fields, _getter = registry[estimator_class]
+    monkeypatch.setitem(
+        registry,
+        estimator_class,
+        (family, fields, lambda _model: {"iterations": 5}),
+    )
+
+    details = _estimator_details(estimator_class(iterations=5))
+
+    assert details["parameters"] == {"iterations": 5}
+    assert details["parameters_source"] == "catboost.get_all_params"
 
 
 def test_custom_estimator_getters_and_repr_are_never_called():
@@ -213,11 +268,13 @@ def test_worker_json_and_reloaded_catboost_model_share_real_parameters(tmp_path)
     parameters = result["estimator_details"]["parameters"]
 
     assert result["status"] == "ok"
-    assert result["estimator_details"]["parameters_source"] == "catboost.get_all_params"
+    assert result["estimator_details"]["parameters_source"].startswith("catboost.get_all_params")
     assert parameters["learning_rate"] == actual["learning_rate"]
     assert parameters["auto_class_weights"] == actual["auto_class_weights"] == "Balanced"
     assert parameters["class_weights"] == actual["class_weights"]
     assert parameters["class_weights"] is not None
+    assert parameters["thread_count"] == 1
+    assert "thread_count=catboost._init_params" in result["estimator_details"]["parameters_source"]
     encoded = json.dumps(parameters)
     assert "rare" not in encoded
     assert "common" not in encoded

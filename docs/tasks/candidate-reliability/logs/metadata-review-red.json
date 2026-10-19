@@ -1,0 +1,13 @@
+{
+  "phase": "review-red",
+  "command": "/Users/egoraprelsky/Desktop/coding/alfa_hackathon/.venv/bin/python -m pytest tests/test_realized_parameters.py -q",
+  "exit_code": 1,
+  "result": "4 failed, 4 passed in 1.62s",
+  "behavioral_failures": [
+    "CatBoost thread_count was absent although native _init_params contained 1",
+    "LinearRegression was unsupported",
+    "nested/cyclic parameter containers were not rejected",
+    "missing CatBoost API fields were emitted as null"
+  ],
+  "import_or_dependency_failure": false
+}
