@@ -81,6 +81,10 @@ class ProcessResult:
     stderr: str
     seconds: float
     peak_memory_mb: float = 0.0
+    started_at: float | None = None
+    finished_at: float | None = None
+    pid: int | None = None
+    n_jobs: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

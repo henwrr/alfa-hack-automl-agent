@@ -187,6 +187,7 @@ def run_process(
     max_output_bytes: int = 131072,
     memory_limit_mb: int | None = None,
     env: dict[str, str] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> ProcessResult:
     """Run an argv directly with capped output, wall timeout, and tree RSS cap."""
     if not argv or any(not isinstance(arg, str) for arg in argv):
@@ -201,6 +202,16 @@ def run_process(
         raise ValueError("memory_limit_mb must be a positive integer")
 
     started = time.monotonic()
+    if cancel_event is not None and cancel_event.is_set():
+        return ProcessResult(
+            status="cancelled",
+            exit_code=None,
+            stdout="",
+            stderr="",
+            seconds=0.0,
+            peak_memory_mb=0.0,
+            n_jobs=n_jobs,
+        )
     stdout_data = bytearray()
     stderr_data = bytearray()
     byte_count = [0]
@@ -210,6 +221,8 @@ def run_process(
     peak_memory_mb = 0.0
     process: subprocess.Popen[bytes] | None = None
     threads: list[threading.Thread] = []
+    started_at: float | None = None
+    finished_at: float | None = None
 
     try:
         popen_options: dict[str, object] = {}
@@ -217,6 +230,7 @@ def run_process(
             popen_options["start_new_session"] = True
         elif os.name == "nt":
             popen_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        started_at = time.time()
         process = subprocess.Popen(
             argv,
             cwd=str(cwd),
@@ -235,6 +249,9 @@ def run_process(
             stderr=f"could not start process: {type(exc).__name__}: {exc}",
             seconds=max(0.0, time.monotonic() - started),
             peak_memory_mb=0.0,
+            started_at=started_at,
+            finished_at=time.time(),
+            n_jobs=n_jobs,
         )
 
     assert process.stdout is not None and process.stderr is not None
@@ -252,6 +269,10 @@ def run_process(
         while process.poll() is None or any(thread.is_alive() for thread in threads):
             current_rss = _process_tree_rss_mb(process.pid)
             peak_memory_mb = max(peak_memory_mb, current_rss)
+            if cancel_event is not None and cancel_event.is_set():
+                status = "cancelled"
+                _kill_process_group(process)
+                break
             if output_overflow.is_set():
                 status = "output_limit"
                 _kill_process_group(process)
@@ -286,6 +307,7 @@ def run_process(
     exit_code = process.poll()
     if status is None:
         status = "ok" if exit_code == 0 else "error"
+    finished_at = time.time()
     return ProcessResult(
         status=status,
         exit_code=exit_code,
@@ -293,4 +315,8 @@ def run_process(
         stderr=stderr_data.decode("utf-8", errors="replace"),
         seconds=max(0.0, time.monotonic() - started),
         peak_memory_mb=peak_memory_mb,
+        started_at=started_at,
+        finished_at=finished_at,
+        pid=process.pid,
+        n_jobs=n_jobs,
     )
