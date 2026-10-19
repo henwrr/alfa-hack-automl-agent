@@ -1,0 +1,18 @@
+{
+  "phase": "red",
+  "command": [
+    "/Users/egoraprelsky/Desktop/coding/alfa_hackathon/.venv/bin/python",
+    "-m",
+    "pytest",
+    "tests/test_families.py",
+    "-q",
+    "--tb=short",
+    "-k",
+    "generators_return_distinct_complete_ast_linted_candidates or limit_order_and_cpu_context_are_stable or each_available_family_fits_predicts_and_round_trips"
+  ],
+  "cwd": "/Users/egoraprelsky/.codex/worktrees/parallel-families/alfa_hackathon",
+  "returncode": 1,
+  "output": "FFFF                                                                     [100%]\n=================================== FAILURES ===================================\n________ test_generators_return_distinct_complete_ast_linted_candidates ________\ntests/test_families.py:56: in test_generators_return_distinct_complete_ast_linted_candidates\n    assert len(candidates) == len(expected)\nE   AssertionError: assert 0 == 3\nE    +  where 0 = len([])\nE    +  and   3 = len({'CatBoost', 'ExtraTrees', 'Linear'})\n_________________ test_limit_order_and_cpu_context_are_stable __________________\ntests/test_families.py:72: in test_limit_order_and_cpu_context_are_stable\n    assert len(first) == 2\nE   assert 0 == 2\nE    +  where 0 = len([])\n_____ test_each_available_family_fits_predicts_and_round_trips[regression] _____\ntests/test_families.py:97: in test_each_available_family_fits_predicts_and_round_trips\n    assert candidates\nE   assert []\n___ test_each_available_family_fits_predicts_and_round_trips[classification] ___\ntests/test_families.py:97: in test_each_available_family_fits_predicts_and_round_trips\n    assert candidates\nE   assert []\n=========================== short test summary info ============================\nFAILED tests/test_families.py::test_generators_return_distinct_complete_ast_linted_candidates\nFAILED tests/test_families.py::test_limit_order_and_cpu_context_are_stable - ...\nFAILED tests/test_families.py::test_each_available_family_fits_predicts_and_round_trips[regression]\nFAILED tests/test_families.py::test_each_available_family_fits_predicts_and_round_trips[classification]\n4 failed, 5 deselected in 0.37s\n",
+  "seconds": 0.611,
+  "setup": "Before implementation, family_candidates was a syntactically valid stub returning an empty list; these tests failed on candidate assertions after successful imports and collection."
+}
