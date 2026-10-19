@@ -468,7 +468,21 @@ class ResearchRun:
 
         if self.config.resume and not self.state.get("active") and (self.directory / "report.json").exists():
             validate_submission(self.task, self.output)
-            return _read_json(self.directory / "report.json")
+            # Older completed runs may predate snapshot redaction. Preserve
+            # no-op resume semantics while cleaning their public reports too.
+            for name in ("state.json", "experiments.json", "report.json"):
+                path = self.directory / name
+                if path.exists():
+                    atomic_write_json(path, self.journal.redact(_read_json(path)))
+            markdown = self.directory / "report.md"
+            if markdown.exists():
+                markdown.write_text(self.journal.redact(markdown.read_text(encoding="utf-8")), encoding="utf-8")
+            report = _read_json(self.directory / "report.json")
+            report.setdefault("decision_log", str(self.directory / "agent.log"))
+            report.setdefault("decisions_path", str(self.directory / "decisions.jsonl"))
+            report = self.journal.redact(report)
+            atomic_write_json(self.directory / "report.json", report)
+            return report
         self.journal.append("run_resumed" if self.config.resume else "run_started", config=self.config.public_dict(), data_fingerprint=self.task.data_fingerprint)
         atomic_write_json(self.directory / "config.json", self.config.public_dict())
         atomic_write_json(self.directory / "task.json", self.journal.redact(self.task.to_dict()))

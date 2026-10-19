@@ -213,3 +213,27 @@ def test_resume_recovers_assessment_after_completed_trial_without_reexecution(tm
     assert before == len([e for e in log if e['event'] == 'trial_started'])
     run(config_for(task, directory, '--offline', '--resume'))
     assert len([e for e in events(directory) if e['event'] == 'experiment_assessed']) == 1
+
+
+def test_completed_legacy_resume_cleans_old_reports_without_new_work(tmp_path, monkeypatch):
+    from automl_agent.agent import ResearchRun
+    key = 'legacy-review-key-729'
+    monkeypatch.setenv('OPENAI_API_KEY', key)
+    task = make_task(tmp_path / 'data')
+    directory = tmp_path / 'run'
+    run(config_for(task, directory, '--offline'))
+    # Simulate reports/snapshots from the old implementation; canonical events
+    # remain authoritative, and no new work is needed for a completed run.
+    for name in ('state.json', 'experiments.json', 'report.json'):
+        path = directory / name
+        content = json.loads(path.read_text())
+        content['legacy_note'] = key
+        path.write_text(json.dumps(content))
+    (directory / 'report.md').write_text('Legacy hypothesis ' + key)
+    def forbidden(*args, **kwargs):
+        raise AssertionError('completed resume must not train')
+    monkeypatch.setattr(ResearchRun, 'experiment', forbidden)
+    report = run(config_for(task, directory, '--offline', '--resume'))
+    assert key not in json.dumps(report)
+    for name in ('state.json', 'experiments.json', 'report.json', 'report.md'):
+        assert key not in (directory / name).read_text(), name
