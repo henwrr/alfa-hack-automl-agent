@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import threading
 import uuid
@@ -232,14 +233,18 @@ class OllamaProvider(_HTTPProvider):
     def _payload(self, messages: list[dict], tools: list[dict], max_tokens: int) -> dict[str, Any]:
         extra = dict(self.extra_body)
         extra_options = extra.pop("options", {})
+        if not isinstance(extra_options, dict):
+            raise ProviderError("Ollama options must be an object", code="invalid_request", retryable=False)
+        options = {"num_ctx": 16384, "temperature": 0.2, **extra_options}
+        options["num_predict"] = max_tokens
         payload: dict[str, Any] = {
             **extra,
             "model": self.model,
-            "messages": messages,
+            "messages": _ollama_request_messages(messages),
             "tools": tools,
             "stream": False,
             "think": False,
-            "options": {**(extra_options if isinstance(extra_options, dict) else {}), "num_predict": max_tokens},
+            "options": options,
         }
         return payload
 
@@ -261,6 +266,44 @@ class OllamaProvider(_HTTPProvider):
             total_tokens=total_tokens,
             finish_reason=str(finish_reason),
         )
+
+
+def _ollama_request_messages(messages: list[dict]) -> list[dict[str, Any]]:
+    """Convert canonical assistant tool arguments into Ollama's object form."""
+    try:
+        prepared = copy.deepcopy(messages)
+    except (TypeError, ValueError):
+        raise ProviderError("provider messages are invalid", code="invalid_request", retryable=False) from None
+    for message in prepared:
+        if not isinstance(message, dict):
+            raise ProviderError("provider message is invalid", code="invalid_request", retryable=False)
+        if message.get("role") != "assistant" or "tool_calls" not in message:
+            continue
+        calls = message["tool_calls"]
+        if not isinstance(calls, list):
+            raise ProviderError("assistant tool calls are invalid", code="invalid_request", retryable=False)
+        for call in calls:
+            if not isinstance(call, dict) or not isinstance(call.get("function"), dict):
+                raise ProviderError("assistant tool call is invalid", code="invalid_request", retryable=False)
+            function = call["function"]
+            arguments = function.get("arguments")
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except (ValueError, json.JSONDecodeError):
+                    raise ProviderError(
+                        "assistant tool arguments are malformed JSON",
+                        code="invalid_tool_arguments",
+                        retryable=False,
+                    ) from None
+            if not isinstance(arguments, dict):
+                raise ProviderError(
+                    "assistant tool arguments must be a JSON object",
+                    code="invalid_tool_arguments",
+                    retryable=False,
+                )
+            function["arguments"] = arguments
+    return prepared
 
 
 def _int_or_zero(value: Any, fallback: int = 0) -> int:

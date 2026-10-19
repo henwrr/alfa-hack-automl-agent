@@ -2,7 +2,7 @@
 
 The harness modules follow the agreed interfaces in `docs/tasks/automl-mvp/CONTRACTS.md`. `Budget` combines saved elapsed time with a monotonic clock and leaves the configured final reserve unavailable to research. `run_process` starts argv directly in a fresh process group, reads stdout and stderr concurrently under one byte cap, samples process-tree RSS with `psutil`, and kills the owned group on timeout, output overflow, memory overflow, or cancellation. Children receive a small environment with explicit host-provided overrides and thread limits; credential-named variables are filtered. `PYTHONPATH` is passed only when the host supplies it.
 
-The provider tests use a local ephemeral HTTP server. They do not call a live model or external API. OpenAI-compatible requests target `/chat/completions` with parallel tool calls disabled; native Ollama requests target `/api/chat` with `stream=false`, `think=false`, and `options.num_predict`. Both adapters return canonical OpenAI-style tool calls with JSON-string arguments and normalized usage. Retries are finite and limited to timeouts, transport failures, rate limits, and server errors; the enclosing timeout includes backoff.
+The provider tests use a local ephemeral HTTP server. They do not call a live model or external API. OpenAI-compatible requests target `/chat/completions` with parallel tool calls disabled; native Ollama requests target `/api/chat` with `stream=false`, `think=false`, and `options.num_predict`. Ollama request history converts canonical assistant tool-call arguments from JSON strings to JSON objects on a copy; malformed arguments fail locally as non-retryable `invalid_tool_arguments`. The response remains in canonical OpenAI form with JSON-string arguments. Ollama defaults to `num_ctx=16384` and `temperature=0.2`; `extra_body.options` can override these while `num_predict` follows `max_tokens`. Retries are finite and limited to timeouts, transport failures, rate limits, and server errors; the enclosing timeout includes backoff.
 
 `EventJournal` serializes appends, redacts supplied secret strings and credential fields, assigns sequential records, and fsyncs each append. It truncates an invalid, unterminated final frame only. A malformed newline-terminated frame, sequence gap, or invalid record shape raises `ValueError`. Atomic JSON snapshots use a same-directory temporary file, fsync, replace, and directory fsync.
 
@@ -32,3 +32,23 @@ $ /Users/egoraprelsky/Desktop/coding/alfa_hackathon/.venv/bin/python -m pytest -
 ```
 
 Coverage includes resume-aware monotonic budget and reserve, sanitized child environment and thread counts, bounded stdout/stderr, timeout cleanup of a descendant, process-tree RSS termination, provider request shapes and normalization, retry classification and total timeout, secret redaction, torn-tail recovery, mid-file corruption rejection, and atomic JSON replacement.
+
+## Provider history follow-up
+
+An integration review added round-trip coverage for an assistant tool call followed by its tool result, option defaults/overrides, and malformed JSON arguments. Before the fix, the three new cases failed (serialized arguments were sent as strings, defaults were missing, and malformed input reached the server):
+
+```text
+RED
+$ /Users/egoraprelsky/Desktop/coding/alfa_hackathon/.venv/bin/python -m pytest -q tests/test_providers.py
+......FFF                                                                [100%]
+3 failed, 6 passed in 4.81s
+```
+
+After conversion and validation, the full runtime/provider/journal suite passed:
+
+```text
+GREEN
+$ /Users/egoraprelsky/Desktop/coding/alfa_hackathon/.venv/bin/python -m pytest -q tests/test_runtime.py tests/test_providers.py tests/test_journal.py
+.....................                                                    [100%]
+21 passed in 6.17s
+```

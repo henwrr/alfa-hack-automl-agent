@@ -151,3 +151,59 @@ def test_timeout_covers_all_attempts_and_backoff():
     assert caught.value.code == "timeout"
     assert duration < 0.3
     assert len(seen) == 1
+
+
+def test_ollama_roundtrips_canonical_assistant_tool_call_and_tool_result():
+    response = {"message": {"role": "assistant", "content": "done"}}
+    assistant_call = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [{
+            "id": "call_lookup",
+            "type": "function",
+            "function": {"name": "lookup", "arguments": '{"city":"Moscow"}'},
+        }],
+    }
+    tool_result = {"role": "tool", "tool_call_id": "call_lookup", "content": "cold"}
+    messages = [assistant_call, tool_result]
+    with fake_server(lambda *_: (200, response, 0)) as (base_url, seen):
+        result = OllamaProvider(base_url, "", "qwen-local").complete(
+            messages, [], timeout=2, max_tokens=55
+        )
+    request_messages = seen[0][2]["messages"]
+    assert request_messages[0]["tool_calls"][0]["function"]["arguments"] == {"city": "Moscow"}
+    assert request_messages[1] == tool_result
+    assert messages[0]["tool_calls"][0]["function"]["arguments"] == '{"city":"Moscow"}'
+    assert result.message["content"] == "done"
+
+
+def test_ollama_uses_native_option_defaults_with_explicit_overrides():
+    response = {"message": {"role": "assistant", "content": "ok"}}
+    with fake_server(lambda *_: (200, response, 0)) as (base_url, seen):
+        OllamaProvider(base_url, "", "qwen-local").complete([], [], timeout=2, max_tokens=41)
+        OllamaProvider(
+            base_url,
+            "",
+            "qwen-local",
+            extra_body={"options": {"num_ctx": 8192, "temperature": 0.7, "top_p": 0.9}},
+        ).complete([], [], timeout=2, max_tokens=42)
+    assert seen[0][2]["options"] == {"num_ctx": 16384, "temperature": 0.2, "num_predict": 41}
+    assert seen[1][2]["options"] == {"num_ctx": 8192, "temperature": 0.7, "top_p": 0.9, "num_predict": 42}
+
+
+def test_ollama_rejects_malformed_canonical_tool_arguments_before_request():
+    with fake_server(lambda *_: (200, {"message": {"role": "assistant", "content": "ok"}}, 0)) as (base_url, seen):
+        provider = OllamaProvider(base_url, "", "qwen-local")
+        with pytest.raises(ProviderError) as caught:
+            provider.complete(
+                [{
+                    "role": "assistant",
+                    "tool_calls": [{"function": {"name": "lookup", "arguments": '{"city":'}}],
+                }],
+                [],
+                timeout=2,
+                max_tokens=10,
+            )
+    assert caught.value.code == "invalid_tool_arguments"
+    assert not caught.value.retryable
+    assert seen == []
