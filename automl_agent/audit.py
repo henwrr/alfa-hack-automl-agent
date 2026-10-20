@@ -190,8 +190,14 @@ def _details_for(event: str, payload: dict) -> dict:
         return _selected(payload, ("requested", "effective"))
     if event == "reserve_updated":
         return _selected(payload, ("previous_reserve", "plan", "remaining_seconds"))
-    if event in {"data_profiled", "validation_planned"}:
+    if event == "data_profiled":
         return _selected(payload, ("summary",))
+    if event == "validation_planned":
+        return {"summary": _project_validation_plan(payload)}
+    if event == "dataset_diagnosed":
+        return _project_dataset_diagnosis(payload)
+    if event == "postprocessing_selected":
+        return _project_postprocessing(payload)
     if event == "research_strategy":
         return _selected(payload, ("strategy",))
     if event == "decision_recorded":
@@ -236,6 +242,10 @@ def _details_for(event: str, payload: dict) -> dict:
             "trial_id", "status", "metric", "metrics", "seconds", "hypothesis",
             "is_baseline", "model_details",
         ))
+        if isinstance(result, dict):
+            diagnostics = _project_trial_diagnostics(result.get("diagnostics"))
+            if diagnostics:
+                details["diagnostics"] = diagnostics
         if isinstance(result, dict) and result.get("status") != "ok":
             code = _short_error_code(result.get("error"), result.get("status"))
             if code:
@@ -306,6 +316,392 @@ def _tool_result_details(payload: dict) -> dict:
     if isinstance(value, dict):
         details["value"] = _pick(value, ("finished", "trial_id", "metrics", "seconds", "selected", "best_metric"))
     return details
+
+
+def _public_number(value: Any) -> int | float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
+def _public_text(value: Any, limit: int = 120) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = " ".join(value.split())
+    return _bounded_text(text, limit) if text else None
+
+
+def _public_label(value: Any) -> Any:
+    if value is None or isinstance(value, bool):
+        return value
+    number = _public_number(value)
+    if number is not None:
+        return number
+    return _public_text(value)
+
+
+def _bounded_string_list(value: Any, limit: int, item_chars: int = 180) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [text for item in value[:limit] if (text := _public_text(item, item_chars)) is not None]
+
+
+def _project_validation_plan(payload: dict) -> dict:
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else payload
+    result = {}
+    for key in ("seed", "fraction", "split_fingerprint", "policy", "support_policy", "fold_count"):
+        if key not in summary:
+            continue
+        value = summary[key]
+        if key in {"seed", "fraction", "fold_count"}:
+            number = _public_number(value)
+            if number is not None:
+                result[key] = number
+        else:
+            text = _public_text(value, 180)
+            if text is not None:
+                result[key] = text
+    coverage = summary.get("coverage")
+    if isinstance(coverage, dict):
+        allowed_coverage = (
+            "eligible_rows", "oof_rows", "covered_rows", "total_rows", "fraction",
+            "coverage", "folds", "train_rows", "validation_rows", "unique_groups",
+        )
+        compact_coverage = {
+            key: _public_number(coverage[key])
+            for key in allowed_coverage
+            if key in coverage and _public_number(coverage[key]) is not None
+        }
+        if compact_coverage:
+            result["coverage"] = compact_coverage
+    elif (number := _public_number(coverage)) is not None:
+        result["coverage"] = number
+    warnings = _bounded_string_list(summary.get("warnings"), 5)
+    if warnings:
+        result["warnings"] = warnings
+    return result
+
+
+def _project_auc(value: Any) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    result = {}
+    for key in ("status", "metric", "reason", "folds", "roc_auc_mean", "roc_auc_std", "seconds", "elapsed_seconds"):
+        if key not in value:
+            continue
+        if key in {"status", "metric", "reason"}:
+            text = _public_text(value[key], 180 if key == "reason" else 40)
+            if text is not None:
+                result[key] = text
+        elif (number := _public_number(value[key])) is not None:
+            result[key] = number
+    return result
+
+
+def _project_temporal_candidates(value: Any) -> list[dict]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    items = []
+    for candidate in value[:5]:
+        if not isinstance(candidate, dict):
+            continue
+        item = {}
+        for key in ("feature", "kind", "direction"):
+            text = _public_text(candidate.get(key), 100)
+            if text is not None:
+                item[key] = text
+        for key in ("future_only",):
+            if isinstance(candidate.get(key), bool):
+                item[key] = candidate[key]
+        for key in ("train_group_count", "train_min", "train_max", "test_min", "test_max"):
+            raw = candidate.get(key)
+            if isinstance(raw, str):
+                text = _public_text(raw, 60)
+                if text is not None:
+                    item[key] = text
+            elif (number := _public_number(raw)) is not None:
+                item[key] = number
+        if item:
+            items.append(item)
+    return items
+
+
+def _feature_shift_item(name: Any, profile: Any) -> tuple[dict | None, float]:
+    if not isinstance(profile, dict):
+        return None, 0.0
+    feature = _public_text(name, 100)
+    kind = _public_text(profile.get("kind"), 30)
+    item = {}
+    if feature is not None:
+        item["feature"] = feature
+    if kind is not None:
+        item["kind"] = kind
+    score = 0.0
+    for key in ("train_missing_rate", "test_missing_rate", "mean_difference"):
+        if (number := _public_number(profile.get(key))) is not None:
+            item[key] = number
+            if key == "mean_difference":
+                score = max(score, abs(float(number)))
+    shift = profile.get("category_shift") if isinstance(profile.get("category_shift"), dict) else profile
+    for key in ("train_only_count", "test_only_count"):
+        if (number := _public_number(shift.get(key))) is not None:
+            item[key] = number
+            score = max(score, float(number))
+    if "train_missing_rate" in item and "test_missing_rate" in item:
+        score = max(score, abs(float(item["train_missing_rate"]) - float(item["test_missing_rate"])))
+    return (item if item else None), score
+
+
+def _project_feature_shift(raw: Any) -> tuple[list[dict], int]:
+    if isinstance(raw, dict):
+        entries = list(raw.items())
+    elif isinstance(raw, (list, tuple)):
+        entries = [
+            (entry.get("feature", f"feature_{index}"), entry)
+            for index, entry in enumerate(raw)
+            if isinstance(entry, dict)
+        ]
+    else:
+        return [], 0
+    changed = []
+    for name, profile in entries:
+        item, score = _feature_shift_item(name, profile)
+        if item is not None and score > 0:
+            changed.append((score, item))
+    changed.sort(key=lambda pair: (-pair[0], pair[1].get("feature", "")))
+    return [item for _, item in changed[:8]], len(changed)
+
+
+def _project_dataset_diagnosis(payload: dict) -> dict:
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), dict) else payload
+    result = {}
+    adversarial = diagnostics.get("adversarial_cv")
+    if isinstance(adversarial, dict):
+        primary = _project_auc(adversarial)
+        if primary:
+            result["adversarial_cv"] = primary
+        without_temporal = _project_auc(adversarial.get("without_temporal"))
+        if without_temporal:
+            result.setdefault("adversarial_cv", {})["without_temporal"] = without_temporal
+    temporal = _project_temporal_candidates(diagnostics.get("temporal_candidates"))
+    if temporal:
+        result["temporal_candidates"] = temporal
+    shift, total = _project_feature_shift(diagnostics.get("feature_shift", diagnostics.get("features")))
+    if shift or total:
+        result["feature_shift"] = shift
+        result["feature_shift_total"] = total
+        result["feature_shift_partial"] = total > len(shift)
+    return result
+
+
+def _project_postprocessing(payload: dict) -> dict:
+    plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else {}
+    accepted = plan.get("accepted", payload.get("accepted"))
+    result = {"accepted": accepted} if isinstance(accepted, bool) else {}
+    members = payload.get("member_trial_ids")
+    if isinstance(members, (list, tuple)):
+        result["member_trial_ids"] = [
+            text for item in members[:3] if (text := _public_text(item, 80)) is not None
+        ]
+    weights = payload.get("weights")
+    if isinstance(weights, (list, tuple)):
+        result["weights"] = [number for item in weights[:3] if (number := _public_number(item)) is not None]
+    multipliers = payload.get("class_multipliers")
+    if isinstance(multipliers, dict):
+        compact = {}
+        for label, value in list(multipliers.items())[:20]:
+            safe_label = _public_label(label)
+            number = _public_number(value)
+            if safe_label is not None and number is not None:
+                compact[str(safe_label)[:80]] = number
+        if compact:
+            result["class_multipliers"] = compact
+    elif isinstance(multipliers, (list, tuple)):
+        compact = []
+        for item in multipliers[:20]:
+            if not isinstance(item, dict):
+                continue
+            label = _public_label(item.get("label", item.get("class")))
+            number = _public_number(item.get("multiplier"))
+            if label is not None and number is not None:
+                compact.append({"label": label, "multiplier": number})
+        if compact:
+            result["class_multipliers"] = compact
+    for key in ("baseline_score", "assessed_score", "calibrated_oof_score"):
+        source = payload.get(key)
+        if (number := _public_number(source)) is not None:
+            result[key] = number
+    assessment = payload.get("assessment")
+    if isinstance(assessment, str):
+        text = _public_text(assessment, 240)
+        if text is not None:
+            result["assessment"] = text
+    elif isinstance(assessment, dict):
+        compact = {}
+        for key in ("status", "reason_code", "reason", "metric_name", "selection_metric", "selected_members"):
+            if key not in assessment:
+                continue
+            value = assessment[key]
+            if key == "selected_members" and isinstance(value, (list, tuple)):
+                compact[key] = [text for item in value[:3] if (text := _public_text(item, 80)) is not None]
+            elif isinstance(value, str) and (text := _public_text(value, 180)) is not None:
+                compact[key] = text
+            elif (number := _public_number(value)) is not None:
+                compact[key] = number
+        if compact:
+            result["assessment"] = compact
+    warnings = _bounded_string_list(payload.get("warnings"), 4)
+    if warnings:
+        result["warnings"] = warnings
+    return result
+
+
+def _project_per_class(value: Any) -> tuple[list[dict], int, bool]:
+    if not isinstance(value, (list, tuple)):
+        return [], 0, False
+    items = []
+    for row in value[:8]:
+        if not isinstance(row, dict):
+            continue
+        item = {}
+        label = _public_label(row.get("label"))
+        if label is not None:
+            item["label"] = label
+        for key in ("precision", "recall", "f1", "support"):
+            if (number := _public_number(row.get(key))) is not None:
+                item[key] = number
+        if item:
+            items.append(item)
+    return items, len(value), len(value) > len(items)
+
+
+def _project_confusion(value: Any) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    labels = value.get("labels")
+    matrix = value.get("matrix")
+    if not isinstance(labels, (list, tuple)) or not isinstance(matrix, (list, tuple)):
+        return {}
+    size = min(10, len(labels), len(matrix))
+    safe_labels = [_public_label(item) for item in labels[:size]]
+    if not all(item is not None for item in safe_labels):
+        return {}
+    safe_matrix = []
+    for row in matrix[:size]:
+        if not isinstance(row, (list, tuple)) or len(row) < size:
+            return {}
+        safe_row = []
+        for item in row[:size]:
+            number = _public_number(item)
+            if number is None:
+                return {}
+            safe_row.append(number)
+        safe_matrix.append(safe_row)
+    result = {"labels": safe_labels, "matrix": safe_matrix}
+    for key in ("total_classes", "partial", "selection"):
+        if key == "partial" and isinstance(value.get(key), bool):
+            result[key] = value[key]
+        elif key == "selection" and (text := _public_text(value.get(key), 60)) is not None:
+            result[key] = text
+        elif key == "total_classes" and (number := _public_number(value.get(key))) is not None:
+            result[key] = number
+    if len(labels) > size:
+        result["partial"] = True
+    return result
+
+
+def _project_segments(value: Any) -> tuple[list[dict], int, bool]:
+    if not isinstance(value, (list, tuple)):
+        return [], 0, False
+    items = []
+    for row in value[:5]:
+        if not isinstance(row, dict):
+            continue
+        item = {}
+        for key in ("feature",):
+            if (text := _public_text(row.get(key), 100)) is not None:
+                item[key] = text
+        if "category" in row:
+            label = _public_label(row["category"])
+            if label is not None:
+                item["category"] = label
+        for key in ("count", "rmse", "mae"):
+            if (number := _public_number(row.get(key))) is not None:
+                item[key] = number
+        if item:
+            items.append(item)
+    return items, len(value), len(value) > len(items)
+
+
+def _project_validation_metrics(value: Any) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    result = {}
+    for key in ("status", "metric_name", "metric", "score", "seconds", "count", "rows", "fold_count"):
+        if key not in value:
+            continue
+        if key in {"status", "metric_name", "metric"}:
+            text = _public_text(value[key], 60)
+            if text is not None:
+                result[key] = text
+        elif (number := _public_number(value[key])) is not None:
+            result[key] = number
+    return result
+
+
+def _project_importance(value: Any) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    result = {}
+    for key in ("status", "method", "mapping_status"):
+        text = _public_text(value.get(key), 60)
+        if text is not None:
+            result[key] = text
+    raw_items = value.get("items")
+    if isinstance(raw_items, (list, tuple)):
+        items = []
+        for row in raw_items:
+            if not isinstance(row, dict):
+                continue
+            feature = _public_text(row.get("feature"), 100)
+            importance = _public_number(row.get("importance"))
+            if feature is not None and importance is not None:
+                items.append({"feature": feature, "importance": importance})
+        items.sort(key=lambda item: (-float(item["importance"]), item["feature"]))
+        result["items"] = items[:8]
+        result["total_items"] = len(raw_items)
+        result["partial"] = len(items) > 8 or len(raw_items) > len(items)
+    return result
+
+
+def _project_trial_diagnostics(value: Any) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    result = {}
+    per_class, total_classes, class_partial = _project_per_class(value.get("per_class"))
+    if per_class or "total_classes" in value:
+        result["per_class"] = per_class
+        total = _public_number(value.get("total_classes"))
+        result["total_classes"] = total if total is not None else total_classes
+        result["partial"] = bool(value.get("partial", class_partial)) or class_partial
+    confusion = _project_confusion(value.get("confusion_matrix"))
+    if confusion:
+        result["confusion_matrix"] = confusion
+    segments, total_segments, segment_partial = _project_segments(value.get("segments"))
+    if segments or "total_segments" in value:
+        result["segments"] = segments
+        total = _public_number(value.get("total_segments"))
+        result["total_segments"] = total if total is not None else total_segments
+        result["segments_partial"] = bool(value.get("partial", segment_partial)) or segment_partial
+    validation = _project_validation_metrics(value.get("validation"))
+    if validation:
+        result["validation"] = validation
+    importance = _project_importance(value.get("feature_importance"))
+    if importance:
+        result["feature_importance"] = importance
+    return result
 
 
 def _selected(payload: dict, fields: tuple[str, ...]) -> dict:
@@ -403,7 +799,45 @@ def _event_text(event: str, details: dict) -> str:
     if event == "data_profiled":
         return f"Профиль данных: {_human_value(details.get('summary'))}."
     if event == "validation_planned":
-        return f"План проверки: {_human_value(details.get('summary'))}."
+        summary = details.get("summary", {})
+        if not isinstance(summary, dict):
+            summary = {}
+        parts = []
+        for key, label in (("support_policy", "политика"), ("policy", "схема"),
+                           ("fold_count", "фолдов"), ("fraction", "доля")):
+            if key in summary:
+                parts.append(f"{label}={_human_value(summary[key])}")
+        coverage = summary.get("coverage")
+        if coverage is not None:
+            parts.append(f"покрытие={_human_value(coverage)}")
+        warnings = summary.get("warnings")
+        if warnings:
+            parts.append("предупреждения=" + _human_value(warnings[:2] if isinstance(warnings, list) else warnings))
+        return "План проверки: " + ("; ".join(parts) if parts else "параметры не указаны") + "."
+    if event == "dataset_diagnosed":
+        return _dataset_diagnosis_text(details)
+    if event == "postprocessing_selected":
+        accepted = details.get("accepted")
+        status = "принята" if accepted is True else "отклонена" if accepted is False else "статус не указан"
+        text = f"План блендинга/постобработки {status}"
+        if details.get("member_trial_ids"):
+            text += f"; участники={_human_value(details['member_trial_ids'])}"
+        if details.get("weights"):
+            text += f"; веса={_human_value(details['weights'])}"
+        if details.get("class_multipliers"):
+            text += f"; множители классов={_human_value(details['class_multipliers'])}"
+        scores = []
+        for key, label in (("baseline_score", "baseline"), ("assessed_score", "оценка"),
+                           ("calibrated_oof_score", "OOF calibration")):
+            if key in details:
+                scores.append(f"{label}={_human_value(details[key])}")
+        if scores:
+            text += "; " + ", ".join(scores)
+        if details.get("assessment") is not None:
+            text += f"; вывод={_human_value(details['assessment'])}"
+        if details.get("warnings"):
+            text += f"; предупреждения={_human_value(details['warnings'][:2])}"
+        return text + "."
     if event == "research_strategy":
         return f"Стратегия исследования: {_human_value(details.get('strategy'))}."
     if event == "decision_recorded":
@@ -481,7 +915,8 @@ def _event_text(event: str, details: dict) -> str:
             result += f", метрика={_human_value(details['metric'])}"
         if details.get("seconds") is not None:
             result += f", время={_human_value(details['seconds'])} с"
-        return result + "."
+        diagnostic_text = _trial_diagnostics_text(details.get("diagnostics"))
+        return result + (f". {diagnostic_text}" if diagnostic_text else ".")
     if event == "candidate_selected":
         return f"Выбран лучший кандидат {details.get('trial_id', 'trial')}: метрика={_human_value(details.get('metric'))}."
     if event == "candidate_restored":
@@ -533,6 +968,141 @@ def _event_text(event: str, details: dict) -> str:
     if event == "run_error":
         return "Ошибка оркестрации; подробности доступны только в каноническом диагностическом журнале."
     return f"Событие {event}."
+
+
+def _format_number(value: Any) -> str:
+    number = _public_number(value)
+    if number is None:
+        return _human_value(value)
+    if isinstance(number, int):
+        return str(number)
+    return f"{number:.4g}"
+
+
+def _dataset_diagnosis_text(details: dict) -> str:
+    pieces = []
+    cv = details.get("adversarial_cv")
+    if isinstance(cv, dict):
+        primary = cv.get("roc_auc_mean")
+        if primary is not None:
+            item = f"adversarial ROC-AUC={_format_number(primary)}"
+            if cv.get("roc_auc_std") is not None:
+                item += f"±{_format_number(cv['roc_auc_std'])}"
+            if cv.get("folds") is not None:
+                item += f" ({_format_number(cv['folds'])} фолда)"
+            seconds = cv.get("seconds", cv.get("elapsed_seconds"))
+            if seconds is not None:
+                item += f"; CV time={_format_number(seconds)} с"
+            pieces.append(item)
+        elif cv.get("reason"):
+            pieces.append(f"adversarial CV {cv.get('status', 'skipped')}: {_human_value(cv['reason'])}")
+        without = cv.get("without_temporal")
+        if isinstance(without, dict) and without.get("roc_auc_mean") is not None:
+            pieces.append(f"без temporal-признаков={_format_number(without['roc_auc_mean'])}")
+    candidates = details.get("temporal_candidates", [])
+    temporal = []
+    if isinstance(candidates, list):
+        for item in candidates[:3]:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("feature", "признак")
+            train_max = item.get("train_max")
+            test_min = item.get("test_min")
+            interval = ""
+            if train_max is not None or test_min is not None:
+                interval = f" (train max={_human_value(train_max)}, test min={_human_value(test_min)})"
+            temporal.append(f"{_human_value(name)}{interval}")
+    if temporal:
+        pieces.append("future-only=" + ", ".join(temporal))
+    shifts = details.get("feature_shift", [])
+    drift = []
+    if isinstance(shifts, list):
+        for item in shifts[:3]:
+            if not isinstance(item, dict):
+                continue
+            name = _human_value(item.get("feature", "feature"))
+            facts = []
+            if item.get("mean_difference") is not None:
+                facts.append(f"Δmean={_format_number(item['mean_difference'])}")
+            if item.get("train_only_count") is not None or item.get("test_only_count") is not None:
+                facts.append(f"train/test-only={_format_number(item.get('train_only_count', 0))}/{_format_number(item.get('test_only_count', 0))}")
+            if item.get("train_missing_rate") is not None or item.get("test_missing_rate") is not None:
+                facts.append(f"missing train/test={_format_number(item.get('train_missing_rate', 0))}/{_format_number(item.get('test_missing_rate', 0))}")
+            if facts:
+                drift.append(f"{name} ({', '.join(facts)})")
+    if drift:
+        pieces.append("drift=" + "; ".join(drift))
+        if details.get("feature_shift_partial"):
+            pieces[-1] += f"; показано 3 из {details.get('feature_shift_total', '?')} признаков"
+    return "Диагностика train/test: " + ("; ".join(pieces) if pieces else "нет доступных сводных фактов") + "."
+
+
+def _trial_diagnostics_text(diagnostics: Any) -> str:
+    if not isinstance(diagnostics, dict):
+        return ""
+    pieces = []
+    per_class = diagnostics.get("per_class")
+    if isinstance(per_class, list) and per_class:
+        rows = []
+        for item in per_class[:3]:
+            if not isinstance(item, dict):
+                continue
+            label = _human_value(item.get("label", "class"))
+            metrics = []
+            for key in ("f1", "recall", "support"):
+                if item.get(key) is not None:
+                    metrics.append(f"{key}={_format_number(item[key])}")
+            rows.append(f"{label} ({', '.join(metrics)})")
+        if rows:
+            pieces.append("худшие классы: " + "; ".join(rows))
+    confusion = diagnostics.get("confusion_matrix")
+    if isinstance(confusion, dict):
+        labels, matrix = confusion.get("labels"), confusion.get("matrix")
+        errors = []
+        if isinstance(labels, list) and isinstance(matrix, list):
+            for row_index, row in enumerate(matrix):
+                if not isinstance(row, list):
+                    continue
+                for column_index, count in enumerate(row):
+                    if row_index != column_index and column_index < len(labels) and _public_number(count) and count > 0:
+                        errors.append((float(count), labels[row_index], labels[column_index]))
+        errors.sort(key=lambda item: (-item[0], str(item[1]), str(item[2])))
+        if errors:
+            pieces.append("ошибки матрицы: " + "; ".join(
+                f"{_human_value(actual)}→{_human_value(predicted)}={_format_number(count)}"
+                for count, actual, predicted in errors[:3]
+            ))
+    segments = diagnostics.get("segments")
+    if isinstance(segments, list) and segments:
+        rendered = []
+        for item in segments[:2]:
+            if not isinstance(item, dict):
+                continue
+            label = f"{_human_value(item.get('feature', 'feature'))}={_human_value(item.get('category'))}"
+            metrics = []
+            for key in ("rmse", "mae", "count"):
+                if item.get(key) is not None:
+                    metrics.append(f"{key}={_format_number(item[key])}")
+            rendered.append(f"{label} ({', '.join(metrics)})")
+        if rendered:
+            pieces.append("сегменты с высокой ошибкой: " + "; ".join(rendered))
+    validation = diagnostics.get("validation")
+    if isinstance(validation, dict):
+        metric = validation.get("metric_name", validation.get("metric"))
+        score = validation.get("score")
+        if metric is not None or score is not None:
+            pieces.append(f"validation {metric or 'score'}={_format_number(score)}")
+        elif validation.get("seconds") is not None:
+            pieces.append(f"validation time={_format_number(validation['seconds'])} с")
+    importance = diagnostics.get("feature_importance")
+    if isinstance(importance, dict) and isinstance(importance.get("items"), list):
+        top = [item for item in importance["items"][:3] if isinstance(item, dict)]
+        if top:
+            pieces.append("важность признаков: " + ", ".join(
+                f"{_human_value(item.get('feature'))}={_format_number(item.get('importance'))}"
+                for item in top
+            ))
+    return "Диагностика: " + "; ".join(pieces) + "." if pieces else ""
 
 
 def _get_nested(value: Any, key: str) -> Any:
