@@ -568,10 +568,12 @@ def select_postprocessing(
             y_values, model_predictions, model_probabilities, class_values,
             metric_value, maximize, task_type,
         )
-        _, _, baseline = _evaluate_rule(
-            y_values, [model_predictions[0]],
-            [model_probabilities[0]] if model_probabilities is not None else None,
-            class_values, [1.0], None, metric_value, task_type,
+        baseline = _score(
+            y_values,
+            model_predictions[0],
+            model_probabilities[0] if model_probabilities is not None else None,
+            class_values,
+            metric_value,
         )
         warnings.append("Недостаточно OOF folds для независимой оценки: нужно минимум два; выбор не принят.")
         return {
@@ -655,10 +657,12 @@ def select_postprocessing(
     all_heldout = np.asarray(heldout_indices, dtype=int)
     heldout_predictions = [value[all_heldout] for value in model_predictions]
     heldout_probabilities = _model_probabilities(model_probabilities, range(len(model_predictions)), all_heldout)
-    baseline_probabilities = [heldout_probabilities[0]] if heldout_probabilities is not None else None
-    _, _, baseline_score = _evaluate_rule(
-        y_values[all_heldout], [heldout_predictions[0]], baseline_probabilities,
-        class_values, [1.0], None, metric_value, task_type,
+    baseline_score = _score(
+        y_values[all_heldout],
+        heldout_predictions[0],
+        heldout_probabilities[0] if heldout_probabilities is not None else None,
+        class_values,
+        metric_value,
     )
     cross_fitted_values = np.concatenate(heldout_outputs)
     cross_fitted_probabilities = (

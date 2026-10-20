@@ -48,6 +48,35 @@ def test_single_model_macro_f1_calibration_is_cross_fitted_and_improves_unseen_f
     json.dumps(result, allow_nan=False)
 
 
+@pytest.mark.parametrize("fold_count", [1, 4])
+@pytest.mark.parametrize(
+    ("label_pair", "classes"),
+    [([0, 1], [0, 1]), (["major", "minor"], ["major", "minor"])],
+)
+def test_baseline_preserves_custom_classifier_predictions_instead_of_probability_argmax(
+    fold_count, label_pair, classes
+):
+    y = np.tile(label_pair, 20)
+    fold_ids = np.repeat(np.arange(fold_count), len(y) // fold_count)
+    probabilities = np.tile([[0.9, 0.1], [0.55, 0.45]], (20, 1))
+    result = select_postprocessing(
+        y=y,
+        predictions=[y.copy()],  # Custom estimator threshold already predicts both classes correctly.
+        probabilities=[probabilities],
+        classes=classes,
+        fold_ids=fold_ids,
+        metric="macro_f1",
+        maximize=True,
+    )
+
+    assert result["baseline_score"] == pytest.approx(1.0)
+    if fold_count == 1:
+        assert result["accepted"] is False
+    else:
+        assert result["accepted"] is False
+        assert result["assessed_score"] == pytest.approx(1.0)
+
+
 def test_iid_blend_learns_two_model_weights_and_accepts_only_cross_fold_gain():
     y, fold_ids, probability, hard_prediction = _binary_fixture()
     second_probability = np.asarray(
