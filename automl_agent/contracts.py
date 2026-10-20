@@ -65,6 +65,10 @@ class ExperimentResult:
     decision: dict[str, Any] = field(default_factory=dict)
     model_details: dict[str, Any] = field(default_factory=dict)
     origin: str | None = None
+    recipe: dict[str, Any] | None = None
+    recipe_hash: str | None = None
+    parent_trial_id: str | None = None
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

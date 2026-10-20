@@ -168,6 +168,8 @@ def test_fake_openai_cli_recovers_from_bad_experiment_and_finishes(tmp_path: Pat
                 sys.executable,
                 str(SOLUTION),
                 str(task_path),
+                "--experiment-mode",
+                "code",
                 "--run-dir",
                 str(run_dir),
                 "--time-budget",

@@ -56,7 +56,7 @@ def plan_research(task, profile, config):
     if high_cardinality:
         priorities.append("Категории высокой кардинальности: сравнить нативный CatBoost с кодированием, контролировать память one-hot.")
     if imbalance is not None and imbalance >= 3:
-        priorities.append("Обнаружен дисбаланс классов: проверить class_weights и метрики классов; сравнивать по целевой метрике, без обещания улучшения.")
+        priorities.append("Обнаружен дисбаланс классов: проверить CatBoost auto_class_weights=Balanced/SqrtBalanced или sklearn class_weight=balanced при том же learning_rate и метрики классов; сравнивать по целевой метрике, без обещания улучшения.")
     priorities.append("После каждого опыта сопоставить качество и время; ошибки исправлять по traceback, победителя выбирать только по host-метрике.")
     return {"facts": facts, "candidate_shortlist": shortlist, "priorities": priorities,
             "selection_rule": f"{task.metric}: {'максимум' if task.maximize else 'минимум'} на одном split; при равенстве выбирается более ранний trial_id. Гарантии победы семейства нет.",

@@ -28,6 +28,7 @@ class Config:
     n_jobs: int = 4
     parallel_trials: int = 2
     family_trials: int = 3
+    experiment_mode: str = "recipe"
     memory_limit_mb: int = 12000
     context_chars: int = 48000
     seed: int = 42
@@ -65,6 +66,7 @@ def parse_config(argv=None) -> Config:
     parser.add_argument("--n-jobs", type=int, default=4, help="Threads per trial; total parallel allocation must be <=8")
     parser.add_argument("--parallel-trials", type=int, choices=[1, 2], default=2)
     parser.add_argument("--family-trials", type=int, choices=[1, 2, 3], default=3, help="Maximum warm-up families; 1 keeps only the legacy baseline")
+    parser.add_argument("--experiment-mode", choices=["recipe", "code"], default="recipe", help="Validated parameter recipes by default; code enables free-form Python proposals")
     parser.add_argument("--memory-limit-mb", type=int, default=12000)
     parser.add_argument("--context-chars", type=int, default=48000)
     parser.add_argument("--seed", type=int, default=42)

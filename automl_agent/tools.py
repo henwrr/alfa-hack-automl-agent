@@ -17,17 +17,22 @@ from jsonschema import Draft202012Validator, ValidationError
 class ToolRegistry:
     def __init__(self):
         self.tools = {}
+        self.hidden = set()
 
-    def register(self, name, description, parameters, handler):
+    def register(self, name, description, parameters, handler, *, advertised=True):
         if name in self.tools:
             raise ValueError(f"Duplicate tool: {name}")
         Draft202012Validator.check_schema(parameters)
         self.tools[name] = (description, parameters, handler)
+        if not advertised:
+            self.hidden.add(name)
 
     def schemas(self):
-        return [{"type": "function", "function": {"name": name, "description": item[0], "parameters": item[1]}} for name, item in self.tools.items()]
+        return [{"type": "function", "function": {"name": name, "description": item[0], "parameters": item[1]}} for name, item in self.tools.items() if name not in self.hidden]
 
-    def execute(self, name, arguments):
+    def execute(self, name, arguments, *, allow_hidden=False):
+        if name in self.hidden and not allow_hidden:
+            return {"ok": False, "error": {"code": "UNAVAILABLE_TOOL", "message": "Use an advertised tool for this experiment mode"}}
         if name not in self.tools:
             return {"ok": False, "error": {"code": "UNKNOWN_TOOL", "message": f"Unknown tool: {name}"}}
         try:
@@ -66,7 +71,9 @@ def parse_response_calls(message):
         raise ValueError("A tool action must be an object")
     name = action.get("tool", action.get("action", action.get("name")))
     if name is None and "experiments" in action:
-        name = "run_experiments"
+        proposals = action["experiments"]
+        typed = isinstance(proposals, list) and proposals and all(isinstance(p, dict) and "base_trial_id" in p for p in proposals)
+        name = "run_model_experiments" if typed else "run_experiments"
     if name is None and "code" in action:
         name = "run_experiment"
     if name is None and "reason" in action:

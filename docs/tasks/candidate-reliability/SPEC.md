@@ -17,3 +17,12 @@ Regression: DataFrame превратился в ndarray до обращения 
 | R7 | Доставка | Полный suite, independent review, ZIP, короткие commits в aprelskiy_branch и push с проверкой remote SHA |
 
 Нет ручных правил под конкретные имена датасетов/target, внешних данных, скрытого score или подмены LLM фиксированным поиском. Исследователь выбирает изменения; host реализует проверенные операции. Свободный Python остаётся расширенным режимом, совместимость старых ответов сохраняется.
+
+## Дополнение пользователя, 20 октября
+R8. Запуск без флагов ограничен прежде всего общим временем/резервом, а не шестью trials: optional max-trials/max-steps, достаточный token safeguard; stop reason честный.
+R9. Диагностика: матрица ошибок и class F1/recall, важность признаков, regression errors по доступным категориальным сегментам, train/test drift и adversarial AUC. Проверка фактов показала train Year_Factor1–5, test6; этот сдвиг учитывается автоматически по семантике временного признака, без жёсткого имени датасета.
+R10. Верифицированные сильные CPU CatBoost/LightGBM/XGBoost с 2000–5000 максимальных итераций и настоящим inner early stopping. Нет использования outer OOF labels для выбора итерации. При недоступной библиотеке — явное исключение из кандидатов.
+R11. По умолчанию CV5 для iid; стратификация когдавозможна, forward group CV при подтверждённом future-only временном признаке. Для5train-yeargroups максимум4forwardфолда. OOF coverage и fold metrics записаны; одинаковый план для всех trials, нет сравнения scores разных splitкакоднойметрики.
+R12. Host fit options реально поддерживают sample_weight, внутренний eval_set и early stopping. Builder context не получает host validation targets; no-op веса/earlystopping невозможны в structured mode.
+R13. Блендинг до3 лучших кандидатов по OOF и постобработка вероятностей для F1. Подбор weights/множителей отделён от оцениваемой meta-части; в отчёте различаются selection/calibration/heldout scores, не обещается гарантированныйприрост. Применённые weights/threshold multipliers воспроизводятся при finalrefit/reload.
+R14. Свободный Python перед полным CV проходит маленький fit/predict/serialization preflight; провал описан и дорогой trialнеидёт. Все изменения на обеихполныхpublicчерезOllama, ZIP/tests/review/pushaprelskiy_branch.

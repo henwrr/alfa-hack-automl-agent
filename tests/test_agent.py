@@ -94,7 +94,7 @@ def build_model(context):
     monkeypatch.setattr(OpenAICompatibleProvider, "complete", complete)
     monkeypatch.setenv("OPENAI_MODEL", "fake")
     monkeypatch.setenv("AUTOML_PROVIDER", "openai")
-    config = parse_config([str(task), "--run-dir", str(tmp_path / "run"), "--time-budget", "30", "--trial-timeout", "0.75", "--max-trials", "2", "--n-jobs", "1"])
+    config = parse_config([str(task), "--experiment-mode", "code", "--run-dir", str(tmp_path / "run"), "--time-budget", "30", "--trial-timeout", "0.75", "--max-trials", "2", "--n-jobs", "1"])
     report = run(config)
     assert report["trials"][-1]["status"] == "timeout"
     assert report["elapsed_seconds"] < 15

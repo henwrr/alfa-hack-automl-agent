@@ -25,6 +25,7 @@ def config(task, directory, **updates):
     cfg = parse_config([*(['--offline'] if updates.get('offline') else []), str(task), '--run-dir', str(directory), '--time-budget', '90', '--trial-timeout', '20',
                         '--max-trials', '4', '--max-steps', '3', '--n-jobs', '4'])
     cfg.family_trials = 1
+    cfg.experiment_mode = "code"
     cfg.parallel_trials = 2
     for key, value in updates.items():
         setattr(cfg, key, value)

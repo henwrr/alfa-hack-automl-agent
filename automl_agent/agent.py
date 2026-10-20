@@ -147,7 +147,7 @@ class ResearchRun:
         for event in events:
             if event.get("event") == "trial_started" and event.get("trial_id") not in finished:
                 trial_id = event["trial_id"]
-                result = ExperimentResult(trial_id, "interrupted", str(self.directory / trial_id), event.get("code_hash", ""), event.get("hypothesis", ""), error="Outcome unknown after interrupted process; not replayed", is_baseline=event.get("is_baseline", False), decision=event.get("decision", {}), origin=event.get("origin"))
+                result = ExperimentResult(trial_id, "interrupted", str(self.directory / trial_id), event.get("code_hash", ""), event.get("hypothesis", ""), error="Outcome unknown after interrupted process; not replayed", is_baseline=event.get("is_baseline", False), decision=event.get("decision", {}), origin=event.get("origin"), recipe=event.get("recipe"), recipe_hash=event.get("recipe_hash"), parent_trial_id=event.get("parent_trial_id"))
                 self.results.append(result)
                 self.journal.append("trial_completed", result=result.to_dict())
                 finished.add(trial_id)
@@ -216,7 +216,7 @@ class ResearchRun:
                 best.error = str(exc)
                 self.journal.append("trial_completed", result=best.to_dict())
 
-    def _dispatch_response(self, request_id, response, registry):
+    def _dispatch_response(self, request_id, response, registry, *, allow_legacy=False):
         from .tools import parse_response_calls
 
         try:
@@ -251,7 +251,7 @@ class ResearchRun:
                     code = "TOKEN_BUDGET" if self.tokens_used >= self.config.max_tokens else "CANCELLED"
                     result = {"ok": False, "error": {"code": code, "message": "Research has stopped; tool was not executed"}}
                 else:
-                    result = registry.execute(function["name"], function["arguments"])
+                    result = registry.execute(function["name"], function["arguments"], allow_hidden=allow_legacy)
                 self.journal.append("tool_result", call_id=call["id"], name=function["name"], result=result)
                 self.tool_results[call["id"]] = result
             self.feedback = json.dumps(result, ensure_ascii=False, default=str)
@@ -278,7 +278,7 @@ class ResearchRun:
             self.journal.append('reserve_updated', previous_reserve=previous.get('reserve_seconds') if previous else None,
                                 plan=plan, remaining_seconds=round(self.budget.remaining(), 3))
 
-    def _prepare_trial(self, hypothesis, code, is_baseline=False, decision=None, origin='llm'):
+    def _prepare_trial(self, hypothesis, code, is_baseline=False, decision=None, origin='llm', recipe=None, recipe_hash=None, parent_trial_id=None):
         from .journal import atomic_write_json
         from .tools import validate_candidate_code
         if len(self.results) + len(self.active_trials) >= self.config.max_trials:
@@ -294,15 +294,17 @@ class ResearchRun:
         directory.mkdir()
         (directory / 'code.py').write_text(code, encoding='utf-8')
         result = ExperimentResult(trial_id, 'error', str(directory), code_hash, hypothesis,
-                                  is_baseline=is_baseline, decision=decision or {}, origin=origin)
+                                  is_baseline=is_baseline, decision=decision or {}, origin=origin, recipe=recipe, recipe_hash=recipe_hash, parent_trial_id=parent_trial_id)
         recorded = self.journal.append('decision_recorded', trial_id=trial_id, source='harness' if is_baseline else 'llm',
                                        hypothesis=hypothesis, decision=result.decision, explanation_provided=bool(result.decision))
         result.decision = recorded['payload']['decision']
         result.hypothesis = recorded['payload']['hypothesis']
         atomic_write_json(directory / 'decision.json', recorded['payload'])
+        if recipe is not None:
+            atomic_write_json(directory / 'recipe.json', self.journal.redact({'recipe': recipe, 'recipe_hash': recipe_hash, 'parent_trial_id': parent_trial_id}))
         self.active_trials[trial_id] = result
         self.journal.append('trial_started', trial_id=trial_id, code_hash=code_hash, hypothesis=result.hypothesis,
-                            is_baseline=is_baseline, origin=origin, decision=result.decision)
+                            is_baseline=is_baseline, origin=origin, decision=result.decision, recipe=result.recipe, recipe_hash=result.recipe_hash, parent_trial_id=result.parent_trial_id)
         self.checkpoint()
         try:
             validate_candidate_code(code)
@@ -331,6 +333,11 @@ class ResearchRun:
                     result.model_details = _read_json(directory / 'worker_result.json', {}).get('estimator_details', {})
                     result.metrics = score_trial(self.task, self.split, directory)
                     result.metric = float(result.metrics[self.task.metric])
+                    from .diagnostics import validation_diagnostics
+                    try:
+                        result.diagnostics = validation_diagnostics(self.task, self.split, directory)
+                    except Exception as exc:
+                        result.diagnostics = {'unavailable': type(exc).__name__}
                     if not math.isfinite(result.metric):
                         raise ValueError('Evaluator returned a non-finite metric')
                     result.prediction_path = str(directory / 'test_predictions.csv')
@@ -363,7 +370,7 @@ class ResearchRun:
         for index, proposal in enumerate(experiments):
             try:
                 result, job = self._prepare_trial(proposal['hypothesis'], proposal['code'], is_baseline,
-                                                  proposal.get('decision'), origin)
+                                                  proposal.get('decision'), origin, proposal.get('recipe'), proposal.get('recipe_hash'), proposal.get('parent_trial_id'))
                 if job is None:
                     outcomes[index] = self._commit_trial(result)
                 else:
@@ -395,18 +402,83 @@ class ResearchRun:
             raise ValueError(result['error'])
         return result
 
+    def _effective_recipe(self, result):
+        """Resolve native defaults from the measured base before applying edits."""
+        from .recipes import normalize_recipe
+        recipe = normalize_recipe(result.recipe, self.task.task_type)
+        if recipe['family'] == 'CatBoost':
+            actual = result.model_details.get('parameters', {})
+            for key in ('iterations', 'learning_rate', 'depth', 'l2_leaf_reg', 'border_count', 'auto_class_weights'):
+                if key in actual and (key != 'auto_class_weights' or self.task.task_type == 'classification'):
+                    recipe['parameters'][key] = actual[key]
+        return normalize_recipe(recipe, self.task.task_type)
+
+    def _llm_model_experiments(self, experiments):
+        from .recipes import normalize_recipe, recipe_code, recipe_fingerprint
+        if not 1 <= len(experiments) <= self.config.parallel_trials:
+            raise ValueError('Batch must contain 1 to parallel_trials independent candidates')
+        known = set()
+        for prior in [*self.results, *self.active_trials.values()]:
+            if prior.recipe:
+                known.add(recipe_fingerprint(prior.recipe, self.task.task_type))
+                known.add(recipe_fingerprint(self._effective_recipe(prior), self.task.task_type))
+        proposals, positions = [], []
+        outcomes = [None] * len(experiments)
+        for position, experiment in enumerate(experiments):
+            try:
+                base = next((r for r in self.results if r.trial_id == experiment.get('base_trial_id')), None)
+                if base is None or base.status != 'ok' or not base.recipe:
+                    raise ValueError('base_trial_id must name a successful measured recipe trial from this run')
+                recipe = self._effective_recipe(base)
+                parameters, preprocessing = experiment.get('parameters', {}), experiment.get('preprocessing', {})
+                if not isinstance(parameters, dict) or not isinstance(preprocessing, dict):
+                    raise ValueError('parameters and preprocessing must be JSON objects')
+                recipe['parameters'].update(parameters)
+                recipe['preprocessing'].update(preprocessing)
+                recipe = normalize_recipe(recipe, self.task.task_type)
+                if recipe['preprocessing'].get('add_missing_indicators') and not any(c not in self.task.categorical_columns for c in self.task.feature_columns):
+                    raise ValueError('Missing indicators require numeric columns; this task has only categorical features')
+                fingerprint = recipe_fingerprint(recipe, self.task.task_type)
+                if fingerprint in known:
+                    raise ValueError('Duplicate recipe: this configuration is already measured, queued or interrupted; propose a real change')
+                known.add(fingerprint)
+                proposals.append({'hypothesis': experiment['hypothesis'], 'decision': experiment.get('decision'),
+                                  'code': recipe_code(recipe, self.task.task_type, self.config.n_jobs),
+                                  'recipe': recipe, 'recipe_hash': fingerprint, 'parent_trial_id': base.trial_id})
+                positions.append(position)
+            except (ValueError, TypeError, KeyError) as exc:
+                outcomes[position] = {'status': 'invalid_recipe', 'error': str(exc)}
+                self.journal.append('recipe_rejected', hypothesis=experiment.get('hypothesis', ''),
+                                    base_trial_id=experiment.get('base_trial_id'), error=str(exc))
+        if proposals:
+            for position, result in zip(positions, self.experiment_batch(proposals)):
+                outcomes[position] = result
+        best = select_best(self.results, self.task.maximize)
+        return {'trials': [({'trial_id': r.trial_id, 'status': r.status, 'metrics': r.metrics, 'error': r.error,
+                            'seconds': r.seconds, 'recipe': r.recipe, 'recipe_hash': r.recipe_hash,
+                            'parent_trial_id': r.parent_trial_id, 'model_details': r.model_details, 'diagnostics': r.diagnostics,
+                            'selected': best is r} if isinstance(r, ExperimentResult) else r) for r in outcomes],
+                'best_metric': best.metric if best else None, 'selected_trial': best.trial_id if best else None}
+
     def _family_comparison(self, strategy):
         from .families import family_candidates
         from .journal import atomic_write_json
         from .modeling import baseline_code
         from .strategy import baseline_decision
         candidates = family_candidates(self.task, self.profile, n_jobs=self.config.n_jobs, limit=self.config.family_trials)
+        from .recipes import default_recipe, recipe_fingerprint
+        for proposal in candidates:
+            proposal['recipe'] = default_recipe(proposal['family'], self.task.task_type)
+            proposal['recipe_hash'] = recipe_fingerprint(proposal['recipe'], self.task.task_type)
         # Preserve two LLM attempt slots. If a complete requested comparison
         # cannot fit, start from the legacy baseline and say why in the log.
         limited = not self.config.offline and self.config.max_trials < len(candidates) + 2
         if self.config.family_trials == 1 or limited:
-            candidates = [{'family': baseline_decision(strategy)['model_family'], 'hypothesis': 'Проверить надёжный baseline перед LLM-исследованием',
-                           'code': baseline_code(self.task, n_jobs=self.config.n_jobs), 'decision': baseline_decision(strategy)}]
+            if self.config.experiment_mode == 'recipe':
+                candidates = candidates[:1]
+            else:
+                candidates = [{'family': baseline_decision(strategy)['model_family'], 'hypothesis': 'Проверить надёжный baseline перед LLM-исследованием',
+                               'code': baseline_code(self.task, n_jobs=self.config.n_jobs), 'decision': baseline_decision(strategy)}]
         attempted = {r.decision.get('model_family') for r in self.results if r.is_baseline}
         proposed = [p for p in candidates if p['family'] not in attempted]
         proposed = proposed[:max(0, self.config.max_trials - len(self.results))]
@@ -419,7 +491,7 @@ class ResearchRun:
         comparison = {'split_fingerprint': self.split['split_fingerprint'], 'metric': self.task.metric,
                       'maximize': self.task.maximize, 'limited_by_trial_budget': limited,
                       'trials': [{'family': r.decision.get('model_family', 'legacy'), 'trial_id': r.trial_id,
-                                  'status': r.status, 'metric': r.metric, 'seconds': r.seconds, 'model_details': r.model_details} for r in trials],
+                                  'status': r.status, 'metric': r.metric, 'seconds': r.seconds, 'model_details': r.model_details, 'recipe': r.recipe, 'recipe_hash': r.recipe_hash} for r in trials],
                       'selected_trial': best.trial_id if best else None}
         atomic_write_json(self.directory / 'family_comparison.json', self.journal.redact(comparison))
         self.profile["family_comparison"] = comparison
@@ -431,7 +503,7 @@ class ResearchRun:
         results = self.experiment_batch(experiments)
         best = select_best(self.results, self.task.maximize)
         return {'trials': [({'trial_id': r.trial_id, 'status': r.status, 'metrics': r.metrics, 'error': r.error,
-                            'model_details': r.model_details, 'selected': best is r} if isinstance(r, ExperimentResult) else r) for r in results],
+                            'model_details': r.model_details, 'diagnostics': r.diagnostics, 'selected': best is r} if isinstance(r, ExperimentResult) else r) for r in results],
                 'best_metric': best.metric if best else None, 'selected_trial': best.trial_id if best else None}
 
     def _llm_experiment(self, hypothesis, code, decision=None):
@@ -440,7 +512,7 @@ class ResearchRun:
             raise ValueError(f"{result.trial_id} {result.status}: {result.error}")
         best = select_best(self.results, self.task.maximize)
         return {"trial_id": result.trial_id, "metrics": result.metrics, "seconds": result.seconds,
-                "selected": best.trial_id == result.trial_id, "best_metric": best.metric, "model_details": result.model_details}
+                "selected": best.trial_id == result.trial_id, "best_metric": best.metric, "model_details": result.model_details, "diagnostics": result.diagnostics}
 
     def _finish(self, reason):
         if not any(r.status == "ok" and not r.is_baseline for r in self.results):
@@ -459,18 +531,34 @@ class ResearchRun:
         provider_type = OllamaProvider if self.config.provider == "ollama" else OpenAICompatibleProvider
         provider = provider_type(base_url=self.config.base_url, api_key=self.config.api_key, model=self.config.model, extra_body=self.config.extra_body)
         registry = ToolRegistry()
+        mode = self.config.experiment_mode
+        if mode == "recipe" and not any(r.status == "ok" and r.recipe for r in self.results):
+            mode = "code"
+        self.journal.append("research_mode_selected", requested=self.config.experiment_mode, effective=mode)
         registry.register("run_experiment", "Test a concrete ML hypothesis with complete build_model(context) Python source.",
-                          {"type": "object", "properties": {"hypothesis": {"type": "string", "minLength": 1, "maxLength": 6000}, "code": {"type": "string", "minLength": 1, "maxLength": 64000}, "decision": DECISION_SCHEMA}, "required": ["hypothesis", "code"], "additionalProperties": False}, self._llm_experiment)
+                          {"type": "object", "properties": {"hypothesis": {"type": "string", "minLength": 1, "maxLength": 6000}, "code": {"type": "string", "minLength": 1, "maxLength": 64000}, "decision": DECISION_SCHEMA}, "required": ["hypothesis", "code"], "additionalProperties": False}, self._llm_experiment, advertised=mode == "code")
         proposal_schema = registry.tools["run_experiment"][1]
         registry.register("run_experiments", "Evaluate two independent hypotheses in parallel on the same holdout; return separate outcomes.",
                           {"type": "object", "properties": {"experiments": {"type": "array", "minItems": 1,
                            "maxItems": self.config.parallel_trials, "items": proposal_schema}},
-                           "required": ["experiments"], "additionalProperties": False}, self._llm_experiments)
+                           "required": ["experiments"], "additionalProperties": False}, self._llm_experiments, advertised=mode == "code")
+        model_proposal = {"type": "object", "properties": {
+            "hypothesis": {"type": "string", "minLength": 1, "maxLength": 6000},
+            "base_trial_id": {"type": "string", "pattern": "^trial_[0-9]+$", "maxLength": 40},
+            "parameters": {"type": "object", "maxProperties": 16,
+                           "description": "Only changed estimator parameters from model_catalog; omitted parameters inherit measured base defaults."},
+            "preprocessing": {"type": "object", "properties": {"add_missing_indicators": {"type": "boolean"}}, "additionalProperties": False},
+            "decision": DECISION_SCHEMA}, "required": ["hypothesis", "base_trial_id"], "additionalProperties": False}
+        registry.register("run_model_experiments", "Test 1-2 independent parameter/preprocessing edits to measured model recipes; host preserves validated pipeline and inherited defaults.",
+                          {"type": "object", "properties": {"experiments": {"type": "array", "minItems": 1,
+                           "maxItems": self.config.parallel_trials, "items": model_proposal}},
+                           "required": ["experiments"], "additionalProperties": False}, self._llm_model_experiments,
+                          advertised=mode == "recipe")
         registry.register("finish_research", "Stop research after a successful generated candidate; host refits the best model.",
                           {"type": "object", "properties": {"reason": {"type": "string", "minLength": 1, "maxLength": 4000}}, "required": ["reason"], "additionalProperties": False}, self._finish)
         for request_id, response in self.pending_responses:
             self.journal.append("llm_response_recovered", request_id=request_id)
-            self._dispatch_response(request_id, response, registry)
+            self._dispatch_response(request_id, response, registry, allow_legacy=True)
         compact = False
         while len(self.results) < self.config.max_trials and self.steps < self.config.max_steps and not self.finish_requested:
             if self.tokens_used >= self.config.max_tokens:
@@ -479,11 +567,13 @@ class ResearchRun:
             if self.budget.research_remaining() <= 1:
                 self.stop_reason = "time_budget"
                 break
+            if compact and mode == "code":
+                registry.hidden.add("run_experiments")  # avoid duplicating the full source-code schema under a tight token budget
             best = select_best(self.results, self.task.maximize)
             messages = build_messages(self.task, self.profile, self.results, best,
                                       {"n_jobs": self.config.n_jobs, "remaining_seconds": round(self.budget.research_remaining(), 2),
                                        "trial_timeout": self.config.trial_timeout, "remaining_trials": self.config.max_trials - len(self.results),
-                                       "parallel_trials": self.config.parallel_trials, "reserve_plan": self.reserve_plan},
+                                       "parallel_trials": 1 if compact and mode == "code" else self.config.parallel_trials, "reserve_plan": self.reserve_plan, "experiment_mode": mode},
                                       feedback=self.feedback, context_chars=self.config.context_chars, compact=compact)
             # Keep complete recent assistant/tool groups. Older attempts remain
             # available through the structured ledger and the durable journal.

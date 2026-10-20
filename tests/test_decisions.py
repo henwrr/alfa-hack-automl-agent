@@ -23,7 +23,7 @@ def make_task(path):
 
 def config_for(task, directory, *extra):
     return parse_config([str(task), '--run-dir', str(directory), '--time-budget', '90', '--trial-timeout', '20',
-                         '--max-trials', '2', '--n-jobs', '1', '--family-trials', '1', *extra])
+                         '--max-trials', '2', '--n-jobs', '1', '--family-trials', '1', '--experiment-mode', 'code', *extra])
 
 
 def events(directory):

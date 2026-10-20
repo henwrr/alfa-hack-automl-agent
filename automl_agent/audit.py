@@ -184,6 +184,10 @@ def _details_for(event: str, payload: dict) -> dict:
         return _selected(payload, ("families", "planned", "limited_by_trial_budget", "split_fingerprint", "comparison"))
     if event in {"batch_started", "batch_completed", "batch_interrupted"}:
         return _selected(payload, ("trial_ids", "origin", "parallel_trials", "threads_per_trial", "memory_limit_mb", "remaining_seconds"))
+    if event == "recipe_rejected":
+        return _selected(payload, ("base_trial_id", "hypothesis", "error"))
+    if event == "research_mode_selected":
+        return _selected(payload, ("requested", "effective"))
     if event == "reserve_updated":
         return _selected(payload, ("previous_reserve", "plan", "remaining_seconds"))
     if event in {"data_profiled", "validation_planned"}:
@@ -225,7 +229,7 @@ def _details_for(event: str, payload: dict) -> dict:
                 details["final_fit"] = final
         return details
     if event == "trial_started":
-        return _selected(payload, ("trial_id", "hypothesis", "is_baseline"))
+        return _selected(payload, ("trial_id", "hypothesis", "is_baseline", "recipe", "parent_trial_id", "recipe_hash"))
     if event == "trial_completed":
         result = payload.get("result")
         details = _pick(result, (
@@ -386,6 +390,10 @@ def _event_text(event: str, details: dict) -> str:
         return f"Группа {_human_value(details.get('trial_ids'))} завершена; осталось на исследования {details.get('remaining_seconds')} с."
     if event == "batch_interrupted":
         return f"Группа прервана; процессы остановлены, неизвестные исходы будут отмечены при resume: {_human_value(details.get('trial_ids'))}."
+    if event == "recipe_rejected":
+        return f"Рецепт отклонён до обучения; основа={details.get('base_trial_id')}: {_human_value(details.get('error'))}."
+    if event == "research_mode_selected":
+        return f"Режим экспериментов: запрошен {details.get('requested')}, используется {details.get('effective')}."
     if event == "reserve_updated":
         return f"Пересчитан резерв финального обучения: {_human_value(details.get('plan'))}; осталось всего {details.get('remaining_seconds')} с."
     if event == "run_started":
@@ -446,6 +454,9 @@ def _event_text(event: str, details: dict) -> str:
         chain = _model_chain(details.get("model_details"))
         if chain:
             result += f". Фактическая цепочка модели: {chain}"
+        parameters = _get_nested(details.get("model_details"), "parameters")
+        if parameters:
+            result += f". Фактические параметры: {_human_value(parameters)}"
         fallback = _get_nested(details.get("model_details"), "fallback_reason")
         if fallback:
             result += f". Причина перехода на запасную модель: {_human_value(fallback)}"
@@ -459,6 +470,8 @@ def _event_text(event: str, details: dict) -> str:
         return f"Проверка submission: {_human_value(details.get('validation'))}; файл={_human_value(details.get('submission_path'))}."
     if event == "trial_started":
         trial = details.get("trial_id", "trial")
+        if details.get("recipe"):
+            return f"Запущен эксперимент {trial}: {_human_value(details.get('hypothesis'))}; основа={details.get('parent_trial_id')}; применённый рецепт={_human_value(details['recipe'])}."
         if details.get("is_baseline"):
             return f"Запущен базовый эксперимент {trial}: {_human_value(details.get('hypothesis'))}."
         return f"Запущен эксперимент {trial}: {_human_value(details.get('hypothesis'))}."
@@ -502,6 +515,9 @@ def _event_text(event: str, details: dict) -> str:
         chain = _model_chain(details.get("model_details"))
         if chain:
             result += f"; фактическая цепочка модели: {chain}"
+        parameters = _get_nested(details.get("model_details"), "parameters")
+        if parameters:
+            result += f". Фактические параметры: {_human_value(parameters)}"
         fallback = _get_nested(details.get("model_details"), "fallback_reason")
         if fallback:
             result += f"; причина перехода на запасную модель: {_human_value(fallback)}"
