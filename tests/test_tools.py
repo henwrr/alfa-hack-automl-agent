@@ -124,6 +124,62 @@ def test_flat_decision_conflicts_are_rejected_explicitly():
     assert calls == []
 
 
+def test_decision_string_list_metadata_is_wrapped_without_changing_experiments():
+    registry, calls = _model_experiment_registry()
+    experiment = {
+        "hypothesis": "Try a parameter",
+        "base_trial_id": "trial_0001",
+        "parameters": {"depth": 4},
+        "decision": {
+            "observations": "The feature has many missing values.",
+            "risks": "The signal may not generalize.",
+            "alternatives": "Leave preprocessing unchanged.",
+        },
+    }
+
+    result = registry.execute("run_model_experiments", {"experiments": [experiment]})
+
+    assert result["ok"]
+    assert result["value"][0]["decision"] == {
+        "observations": ["The feature has many missing values."],
+        "risks": ["The signal may not generalize."],
+        "alternatives": ["Leave preprocessing unchanged."],
+    }
+    assert result["value"][0]["parameters"] == {"depth": 4}
+    assert calls == result["value"]
+
+
+def test_decision_empty_string_is_not_fabricated():
+    registry, calls = _model_experiment_registry()
+    experiment = {
+        "hypothesis": "Try a parameter",
+        "base_trial_id": "trial_0001",
+        "decision": {"observations": ""},
+    }
+
+    result = registry.execute("run_model_experiments", {"experiments": [experiment]})
+
+    assert not result["ok"]
+    assert "expected=array" in result["error"]["message"]
+    assert calls == []
+
+
+def test_decision_list_normalization_does_not_coerce_numeric_parameters():
+    registry, calls = _model_experiment_registry()
+    experiment = {
+        "hypothesis": "Try a parameter",
+        "base_trial_id": "trial_0001",
+        "parameters": {"depth": "4"},
+        "decision": {"observations": "Metadata only"},
+    }
+
+    result = registry.execute("run_model_experiments", {"experiments": [experiment]})
+
+    assert not result["ok"]
+    assert "expected=integer" in result["error"]["message"]
+    assert calls == []
+
+
 def test_invalid_large_container_error_is_compact_and_does_not_echo_payload():
     registry, _ = _model_experiment_registry()
     marker = "private-payload-marker"

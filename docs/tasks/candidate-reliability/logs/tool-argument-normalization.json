@@ -24,6 +24,16 @@
     "decision_metadata_normalized": true,
     "regression_catboost_auto_class_weights_preserved_for_recipes": "Balanced"
   },
+  "request4_metadata_dry_run": {
+    "schema_event_seq": 34,
+    "tool_call_seq": 58,
+    "registered_callback_without_fit": true,
+    "registry_execute_ok": true,
+    "captured_experiments": 2,
+    "decision_observations_wrapped": true,
+    "parameters_preprocessing_fit_options_changed": false,
+    "string_numeric_parameter_still_rejected": true
+  },
   "other_checks": {
     "compileall": "passed",
     "git_diff_check": "passed"

@@ -195,6 +195,39 @@ def _move_flat_experiment_decisions(arguments, schema):
         experiment["decision"] = nested
 
 
+def _normalize_decision_string_lists(value, schema, depth=0):
+    """Wrap non-empty strings only for the three declared decision string lists."""
+    if not isinstance(schema, dict) or depth >= _MAX_CONTAINER_DECODE_DEPTH:
+        return value
+
+    properties = schema.get("properties", {})
+    if isinstance(value, dict) and isinstance(properties, dict):
+        decision = value.get("decision")
+        decision_schema = properties.get("decision")
+        decision_properties = decision_schema.get("properties", {}) if isinstance(decision_schema, dict) else {}
+        if isinstance(decision, dict) and isinstance(decision_properties, dict):
+            for field in ("observations", "alternatives", "risks"):
+                field_schema = decision_properties.get(field)
+                item_schema = field_schema.get("items", {}) if isinstance(field_schema, dict) else {}
+                if (_schema_types(field_schema) == {"array"} and _schema_types(item_schema) == {"string"}
+                        and isinstance(decision.get(field), str) and decision[field]):
+                    decision[field] = [decision[field]]
+
+        additional = schema.get("additionalProperties")
+        for key, item in list(value.items()):
+            child_schema = properties.get(key)
+            if child_schema is None and isinstance(additional, dict):
+                child_schema = additional
+            if isinstance(child_schema, dict):
+                value[key] = _normalize_decision_string_lists(item, child_schema, depth + 1)
+    elif isinstance(value, list):
+        item_schema = schema.get("items")
+        if isinstance(item_schema, dict):
+            for index, item in enumerate(value):
+                value[index] = _normalize_decision_string_lists(item, item_schema, depth + 1)
+    return value
+
+
 class ToolRegistry:
     def __init__(self):
         self.tools = {}
@@ -227,6 +260,7 @@ class ToolRegistry:
                 _move_flat_experiment_decisions(parsed, schema)
             except _ArgumentNormalizationError as exc:
                 return {"ok": False, "error": {"code": "INVALID_ARGUMENTS", "message": str(exc)[:_MAX_ARGUMENT_ERROR_LENGTH]}}
+        parsed = _normalize_decision_string_lists(parsed, schema)
         errors = list(Draft202012Validator(schema).iter_errors(parsed))
         if errors:
             errors.sort(key=lambda error: (_error_path(error.absolute_path), str(error.validator)))
