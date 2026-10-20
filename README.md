@@ -1,181 +1,150 @@
 # AutoML MVP
 
-CLI-агент для исследования supervised-табличных задач из CSV. Он читает `task.md`, сравнивает семейства моделей, проверяет гипотезы на фиксированной локальной валидации и записывает submission. В MVP заданы регрессия и классификация; неизвестные форматы файлов и задачи без размеченного train CSV не поддерживаются.
+CLI-агент исследует supervised tabular CSV и сохраняет submission рядом с task.md. После настройки провайдера обычный запуск без исследовательских флагов использует до трёх часов, CV, сравнение моделей и LLM-гипотезы:
+
+~~~bash
+.venv/bin/python solution.py task.md
+~~~
+
+Поддерживаются задачи регрессии и классификации с одной целевой колонкой. Качество заранее неизвестно: завершение задачи и успешный fit сами по себе не означают улучшения метрики.
 
 ## Установка
 
-Нужен Python 3.12 и [uv](https://docs.astral.sh/uv/). Для локальной среды:
+Требуются Python 3.12 и [uv](https://docs.astral.sh/uv/):
 
-```bash
+~~~bash
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -r requirements-mvp.txt
-```
+~~~
 
-Для тестов установите отдельную dev-зависимость:
+Для тестов:
 
-```bash
+~~~bash
 uv pip install --python .venv/bin/python -r requirements-dev.txt
-```
+.venv/bin/python -m pytest -q
+~~~
 
-`requirements-mvp.txt` — необходимое подмножество закреплённых версий из организаторского `requirements.txt`. Исходный `requirements.txt` не изменён. В ZIP включается только runtime-подмножество.
+requirements-mvp.txt — runtime-подмножество закреплённых версий из организаторского requirements.txt. ZIP содержит только это runtime-подмножество.
 
-## Запуск с LLM
+CPU wheels для CatBoost, LightGBM и XGBoost могут требовать системную OpenMP runtime-библиотеку. Linux Docker image устанавливает libgomp1. При ошибке загрузки libomp/libgomp сверяйтесь с официальными инструкциями [LightGBM](https://lightgbm.readthedocs.io/en/v4.6.0/Installation-Guide.html), [XGBoost](https://xgboost.readthedocs.io/en/stable/install.html) и [CatBoost](https://catboost.ai/docs/en/concepts/python-installation), учитывая свою ОС и Python wheel. На локальной macOS-среде запуск использовал уже имеющийся sklearn/.dylibs/libomp.dylib через process-local rpath; Homebrew там не установлен. Это особенность той среды, а не новая зависимость проекта. Глобальные пути библиотек проект не меняет.
 
-OpenAI-compatible endpoint настраивается через совместимые с baseline переменные окружения:
+## Провайдер и запуск
 
-```bash
+Для OpenAI-compatible endpoint задайте переменные окружения:
+
+~~~bash
 export AUTOML_PROVIDER=openai
 export OPENAI_API_KEY='ваш ключ'
-export OPENAI_MODEL='имя-модели'
+export OPENAI_MODEL='имя модели'
 export OPENAI_BASE_URL='https://адрес-endpoint/v1'
+.venv/bin/python solution.py task.md --run-dir runs/my-run
+~~~
 
-.venv/bin/python solution.py /path/to/task.md \
-  --time-budget 10800 --trial-timeout 600 --max-trials 20 \
-  --max-steps 60 --max-tokens 250000 --llm-timeout 240 \
-  --parallel-trials 2 --n-jobs 4 --family-trials 3
-```
+Для локальной Ollama:
 
-Для локальной **native Ollama** укажите тот же набор baseline-переменных и выберите провайдер:
-
-```bash
+~~~bash
 export AUTOML_PROVIDER=ollama
-export OPENAI_API_KEY=''  # локальная Ollama не требует ключа
-export OPENAI_MODEL='qwen3.5:9b'
-export OPENAI_BASE_URL='http://127.0.0.1:11434'
+export OPENAI_API_KEY=ollama
+export OPENAI_MODEL=qwen3.5:9b
+export OPENAI_BASE_URL=http://127.0.0.1:11434
+.venv/bin/python solution.py task.md --run-dir runs/qwen-run
+~~~
 
-.venv/bin/python solution.py 'Регрессия/task.md' \
-  --run-dir runs/regression-01 --time-budget 10800 \
-  --parallel-trials 2 --n-jobs 4 --family-trials 3 \
-  --max-trials 20 --max-steps 60 --max-tokens 250000 --llm-timeout 240
-```
+Ollama и модель должны быть установлены и запущены отдельно. Native endpoint использует адрес без /v1. Переменные и пример находятся в [.env.example](.env.example), но приложение не загружает файл .env автоматически: экспортируйте значения из shell или используйте менеджер секретов. Не помещайте ключи в task.md, CLI-аргументы или код.
 
-Ollama должна быть установлена и запущена отдельно; нужная модель должна быть загружена заранее. Режим `ollama` использует native endpoint, не OpenAI-совместимый `/v1`. Шаблон значений находится в [.env.example](.env.example); приложение само не загружает `.env`, поэтому экспортируйте переменные в shell либо передайте их через менеджер секретов.
+После запуска можно следить за решениями:
 
-Путь к задаче можно дополнить параметрами:
+~~~bash
+tail -F runs/qwen-run/agent.log
+~~~
 
-| Параметр | Назначение |
+Путь к данным задаётся в task.md. Параметры задачи, провайдера и бюджета сохраняются в run-dir.
+
+## Режим исследования и лимиты
+
+Без исследовательских флагов действует CV-протокол. Основные параметры CLI:
+
+| Флаг | Значение по умолчанию | Назначение |
+|---|---:|---|
+| --time-budget | 10800 секунд | Общий wall-clock бюджет; максимум 10800 |
+| --trial-timeout | 1800 секунд | Максимальное время одного candidate trial |
+| --llm-timeout | 180 секунд | Таймаут одного запроса LLM |
+| --max-trials | без фиксированного предела | Необязательный лимит всех trials, включая стартовые и неудачные |
+| --max-steps | без фиксированного предела | Необязательный лимит шагов исследователя |
+| --max-tokens | 2000000 | Общая страховочная граница входных и выходных токенов |
+| --cv-folds | 5 | Число OOF folds; значение 1 включает прежний holdout-режим |
+| --validation-strategy | auto | IID CV или forward-group CV по подтверждённому future-only периоду |
+| --family-trials | 4 | Максимальное число начальных семейств |
+| --parallel-trials | 2 | До двух процессов одновременно |
+| --n-jobs | 4 | CPU-потока на процесс; общее назначение не выше восьми |
+| --experiment-mode | recipe | Валидированные рецепты; code включает свободный Python |
+| --time-column | автоматически | Необязательное явное указание временного признака |
+| --run-dir | .automl/timestamp-id рядом с task.md | Переопределить каталог артефактов; с --resume продолжить его |
+
+--max-trials и --max-steps можно указать, чтобы остановить исследование раньше. Обычно исследование ограничивают общее время и резерв на финальный fit. Начальный резерв составляет 15% общего времени и пересчитывается по измеренным fold-fit/refit данным; это оценка, а не гарантия успеть переобучить модель. Исследовательский timeout не ограничивает финальный fit.
+
+Для короткого legacy-smoke указывайте holdout и timeout явно, чтобы случайно не запускать несколько полных CV fits:
+
+~~~bash
+.venv/bin/python solution.py task.md --offline --cv-folds 1 --trial-timeout 180 \
+  --time-budget 300 --family-trials 1 --max-trials 1 --n-jobs 1 \
+  --run-dir runs/smoke-holdout
+~~~
+
+cv-folds=1 использует прежнее разбиение и не создаёт OOF артефакты. Его метрики не сравнивайте с CV, особенно с forward temporal CV.
+
+## CV, кандидаты и исследовательские инструменты
+
+Сначала host строит bounded train/test диагностику и сохраняет dataset_diagnostics.json. По умолчанию для iid данных используются пять folds: стратифицированные для классификации, когда возможно, иначе KFold. При validation-strategy=auto временная схема выбирается, когда семантика названия признака поддерживает время, в test все значения позже максимума train и есть минимум три train-периода. Для пяти train-периодов это даёт четыре forward-group folds; первый период не получает OOF предсказаний. Эта проверка опирается на наблюдаемое распределение, а не на фиксированное имя датасета. Явный --time-column задаёт временной столбец; validation-strategy=iid отключает автоматический temporal выбор.
+
+Стартовый shortlist включает до четырёх CPU-семейств при доступных пакетах: CatBoost до 3000 итераций, LightGBM до 5000, ExtraTrees и XGBoost до 3000. Начальные boosting-рецепты запрашивают 100 rounds early stopping на отдельном inner train-only eval_set; ExtraTrees обучается без early stopping. Выбранные итерации сохраняются по folds и используются для final iteration override при refit. Внешние OOF labels не используются для inner stopping. Реальные параметры и время обучения записываются в результаты, поэтому заявленное LLM семейство само по себе не считается доказательством backend.
+
+По умолчанию LLM использует tool run_model_experiments. Каждая гипотеза указывает base_trial_id успешного измеренного recipe trial и только изменённые поля parameters, preprocessing и/или fit_options. Host наследует измеренные defaults, проверяет параметры и веса, строит полный recipe/code и отклоняет дубликаты до обучения. sample_weight фактически передаётся в fit; early stopping создаёт внутренний eval_set; двойное применение весов запрещено.
+
+Флаг --experiment-mode code включает run_experiment/run_experiments со свободным Python. До полного CV host выполняет ограниченный preflight на данных только из train части первого fold: fit, predict и проверку сериализации/reload. Ошибка preflight отменяет дорогой CV trial. В recipe mode preflight не нужен, поскольку код строит host из проверенной схемы.
+
+После candidate CV host независимо считает OOF метрики, ошибки классов или сегментов и важность признаков. Для совместимых successful trials может выбрать блендинг до трёх разных кандидатов и class multipliers для Macro F1. Подбор postprocessing и его cross-fitted/forward assessment разделены; calibrated_oof_score показывается отдельно от assessed_score. Это не nested CV: базовые модели уже выбраны с помощью тех же OOF результатов, поэтому мета-оценка не является независимым тестом и может быть оптимистичной. В отчёте сохраняются причина выбора/отказа и применённые параметры.
+
+## Артефакты и отчёты
+
+submission.csv пишется рядом с task.md. Укажите --run-dir, чтобы задать место для журнала и результатов.
+
+| Артефакт | Содержимое |
 |---|---|
-| `--time-budget SECONDS` | общий лимит запуска |
-| `--trial-timeout SECONDS` | лимит одного эксперимента |
-| `--max-trials N` | общий предел опытов, включая сравнение семейств, ошибки и отменённые кандидаты |
-| `--max-steps N` | предел шагов LLM-loop |
-| `--max-tokens N` | суммарный бюджет входных и выходных токенов; по умолчанию 100000 |
-| `--response-tokens N` | максимум выходных токенов одного ответа; по умолчанию 6144 |
-| `--llm-timeout SECONDS` | лимит одного вызова LLM с повторами |
-| `--n-jobs N` | потоков на один worker; по умолчанию 4 |
-| `--parallel-trials 1\|2` | одновременно обучаемых кандидатов; по умолчанию 2 |
-| `--family-trials 1\|2\|3` | максимум начальных семейств; по умолчанию 3, значение 1 оставляет прежний baseline |
-| `--memory-limit-mb N` | RSS-лимит одного worker, по умолчанию 12000 MB |
-| `--run-dir PATH` | каталог журнала, состояния и артефактов |
-| `--resume` | продолжить запуск из указанного `--run-dir` |
-| `--offline` | локальное сравнение моделей без вызова LLM |
-| `--seed N` | seed разбиения и воспроизводимых шагов |
-| `--target NAME` | явное имя целевого столбца |
-| `--task-type regression\|classification` | явный тип задачи |
-| `--metric NAME` | явная метрика |
+| cv_plan.json | Общий split/fold plan, validation coverage, временная политика и fingerprint |
+| dataset_diagnostics.json | Train/test drift, temporal candidates и adversarial ROC-AUC |
+| agent.log, decisions.jsonl | Публичная читаемая и структурированная проекции решений |
+| events.jsonl | Первичный журнал событий, LLM usage, ошибок и результатов |
+| trial_XXXX/recipe.json, code.py | Recipe, hash и полный код кандидата |
+| trial_XXXX/preflight.json | Train-only preflight для свободного code mode |
+| trial_XXXX/fold_*.json | Метрики, inner stopping и параметры каждого CV fold |
+| trial_XXXX/valid_predictions.csv, oof_indices.npy, oof_fold_ids.npy | OOF предсказания, позиции и принадлежность fold |
+| trial_XXXX/valid_probabilities.npy, test_probabilities.npy | Вероятности классов, если модель их поддерживает |
+| trial_XXXX/diagnostics (в experiments.json/report.json) | Class F1/recall, confusion, regression segments, OOF summary, feature importance |
+| postprocessing.json | Принятие/отказ, blend weights, class multipliers и разделённые scores |
+| final_*/model.joblib | Сохранённая итоговая модель или ensemble |
+| experiments.json, report.json, report.md | Trial outcomes, выбранный кандидат, refit, submission и пути |
 
-Для платформенного лимита в 3 часа задавайте `--time-budget` не выше `10800` секунд; более низкий лимит оставляет время на завершение финальной записи. Возобновляйте задачу с теми же данными, настройками и каталогом `--run-dir`; состояние сверяет fingerprint входов и конфигурацию split.
+report.json status completed означает, что успешно выполнен хотя бы один LLM candidate; degraded — что успешного LLM candidate нет, хотя рабочий baseline мог сохранить submission; offline — запуск без LLM. Ни один статус не гарантирует улучшения метрики, лучшего качества submission или независимого подтверждения гипотез. Проверяйте best_metric, выбранный trial, postprocessing и final_fit.status отдельно. Финальная проверка submission охватывает схему/строки файла, но не скрытую метрику платформы.
 
-По умолчанию перед LLM сравниваются CatBoost, ExtraTrees и линейная модель на одном holdout. Общий `--max-trials` должен оставить после этого хотя бы два LLM-опыта; иначе запускается один прежний baseline. Это правило не ограничивает `--offline`. Две независимые гипотезы LLM может передать одним `run_experiments`; одиночный `run_experiment` тоже поддерживается. Фактический параллелизм зависит от ответа модели: пара из двух опытов не обязательна в каждом ответе.
+Полный live CV run обеих публичных задач ещё не выполнен, поэтому новых числовых результатов в этом README нет. Исторические прогоны и протоколы находятся в [docs/VALIDATION.md](docs/VALIDATION.md); holdout scores из предыдущих запусков нельзя напрямую сравнивать с temporal CV. Подробности текущего протокола: [docs/RESEARCH_STRATEGY.md](docs/RESEARCH_STRATEGY.md).
 
-Конфигурация требует `parallel_trials × n_jobs ≤ 8` и суммы объявленных RSS-лимитов ≤28000 MB. Для последовательного обучения восьмью потоками используйте `--parallel-trials 1 --n-jobs 8`. Supervisor контролирует процессы и RSS, а окружение и `context["n_jobs"]` задают потоки библиотек; OS-изоляция ресурсов зависит от среды запуска.
+## ZIP и Docker
 
-Резерв финального обучения сначала равен 15% общего времени, затем пересчитывается по длительности успешного победителя, отношению полного train к обучающей части и коэффициенту 1.5. Добавляется запас на запись, сохраняется минимум 5% бюджета. `--trial-timeout` ограничивает исследовательский опыт; финальное обучение использует оставшееся общее время с запасом на запись. План и причины пересчёта видны в журнале и `report.json`.
+Собрать платформенный ZIP:
 
-Перед запросом бюджет проверяется по консервативной UTF-8-оценке сообщений, tool schemas и служебного обрамления. После ответа учитывается usage провайдера; при его отсутствии и при прерванном запросе используется оценка. Денежный лимит команды зависит от тарифа будущего API. Сохранённый ответ и его usage восстанавливаются из журнала без повторной оплаты запроса; начатый Python trial с неизвестным исходом автоматически не повторяется.
-
-## Наблюдение за решениями агента
-
-Задайте явный каталог запуска. Например, для локальной Ollama после экспорта переменных выше:
-
-```bash
-.venv/bin/python solution.py 'Многоклассовая классификация/task.md' \
-  --run-dir runs/classification-audit-01 --time-budget 10800 \
-  --max-trials 20 --max-steps 60 --max-tokens 250000 \
-  --parallel-trials 2 --n-jobs 4 --family-trials 3
-```
-
-В другом терминале из корня проекта:
-
-```bash
-tail -F runs/classification-audit-01/agent.log
-```
-
-Объяснения также поступают в stderr основного терминала. Здесь видны факты данных, начальный список моделей, причины гипотез, ожидания, альтернативы, риски, фактический backend обучения, проверенные метрики, принятие или отклонение кандидата и завершение. Это публичные объяснения решений и действий; скрытые внутренние рассуждения модели не запрашиваются.
-
-| Файл в `--run-dir` | Содержимое |
-|---|---|
-| `agent.log` | Читаемый журнал решений во время работы |
-| `decisions.jsonl` | Те же решения в структурированном виде с номерами исходных событий |
-| `strategy.json` | Профиль задачи, shortlist моделей и лимиты запуска |
-| `family_comparison.json` | Измеренные метрики начальных семейств, split fingerprint и победитель сравнения |
-| `state.json`, `report.json` → `reserve_plan` | Текущий резерв финального обучения и его расчёт |
-| `events.jsonl` | Первичный журнал: запросы LLM, tool-вызовы, usage, ошибки и результаты |
-| `trial_XXXX/decision.json` | Гипотеза и объяснение конкретного опыта |
-| `trial_XXXX/code.py` | Полный код модели и preprocessing |
-| `trial_XXXX/process.json` | stdout, stderr, статус, PID, n_jobs и интервалы процесса для проверки параллелизма |
-| `trial_XXXX/worker_result.json` | Фактическая модель и пути предсказаний |
-| `experiments.json`, `report.json`, `report.md` | Метрики опытов, выбранная модель и итоговые пути |
-
-`report.json.status`: `completed` означает, что хотя бы один LLM-кандидат успешно выполнен; `degraded` — что успешных LLM-кандидатов нет, хотя рабочий baseline мог дать валидный CSV; `offline` — запуск без LLM. Статус полного переобучения проверяйте отдельно в `final_fit.status`. Успешное выполнение опыта не означает улучшения метрики или подтверждения всех утверждений из гипотезы.
-
-`submission.csv` сохраняется рядом с `task.md`. В примере это `Многоклассовая классификация/submission.csv`; полный путь также находится в `report.json`. `agent.log` и `decisions.jsonl` восстанавливаются из `events.jsonl` при `--resume`, без повторного обучения завершённых опытов и без дублирования старого вывода в терминал. Если старая модель не передала подробное объяснение, журнал сообщает об этом; гипотеза и наблюдаемые действия сохраняются. Для уже завершённого запуска `--resume` восстановит представления имеющихся событий; новые объяснения задним числом не добавятся.
-
-Подробности выбора моделей, адаптивного резерва и параллельных опытов: [стратегия исследования](docs/RESEARCH_STRATEGY.md). Стратегия даёт рекомендации по данным; победителя определяет измеренная метрика, а не название библиотеки.
-
-По умолчанию submission записывается как `submission.csv` рядом с `task.md`. В `--run-dir` сохраняются `events.jsonl`, `state.json`, `task.json`, `profile.json`, `split_manifest.json`, `experiments.json`, `report.json`, `report.md` и каталоги `trial_0001/` и далее с кодом, manifest, логом процесса и предсказаниями. Отчёт содержит статус, выбранный опыт, метрики и пути к результатам. Передавайте API-ключи через переменные окружения; не помещайте их в `task.md`, аргументы CLI или код.
-
-## Smoke и проверки
-
-`--offline` запускает детерминированное сравнение семейств без LLM. Для короткого smoke с одним baseline добавьте `--family-trials 1 --max-trials 1`; такой smoke проверяет обнаружение CSV, CLI и запись результата. Проверка исследования требует живой LLM или acceptance-сервера.
-
-Чтобы проверить обе публичные задачи локально, положите предоставленные CSV рядом с их `task.md`, затем запустите:
-
-```bash
-.venv/bin/python scripts/smoke_public.py \
-  'Регрессия/task.md' 'Многоклассовая классификация/task.md'
-```
-
-Скрипт передаёт CLI только `--offline`, ограничивает smoke бюджетом и числом опытов, удаляет настройки провайдеров из дочернего окружения и складывает артефакты в `runs/public-smoke/`. Данные в репозиторий и ZIP не включаются.
-
-Acceptance-проверка отправляет subprocess CLI синтетический CSV и использует локальный fake OpenAI-compatible HTTP server. Сервер возвращает код с ошибкой, затем исправленную гипотезу и `finish_research`; проверяются submission, отчёт и порядок событий восстановления. Suite не запускает Ollama и не требует живого API.
-
-## Сборка ZIP и Docker
-
-Платформенный архив создаётся в `dist/solution.zip`:
-
-```bash
+~~~bash
 .venv/bin/python scripts/package_solution.py
-```
+~~~
 
-В корне ZIP находится `solution.py`, затем runtime-пакет `automl_agent`, README, пример окружения и `requirements-mvp.txt`. Упаковщик использует allowlist и стабильные timestamp, порядок и права ZIP-записей. Данные, `.env`, `.venv`, тесты, результаты запусков и исследовательские материалы в него не попадают.
+Результат — dist/solution.zip. В архив входят solution.py, runtime-пакет automl_agent, README, .env.example и requirements-mvp.txt. Данные, secrets, .venv, тесты и результаты запусков исключены.
 
-Dockerfile фиксирует Python 3.12 slim и runtime-зависимости; entrypoint запускает `solution.py`. Пример после подготовки локального `.env`:
+В Dockerfile установлен Linux runtime libgomp1. Пример запуска:
 
-```bash
+~~~bash
 docker build -t automl-agent:local .
-docker run --rm --env-file .env \
-  -v "$PWD/Регрессия:/task" automl-agent:local \
-  /task/task.md --run-dir /task/runs/container-run
-```
+docker run --rm --env-file .env -v "$PWD/data:/data" automl-agent:local \
+  /data/task.md --run-dir /data/runs/docker-run
+~~~
 
-Docker — дополнительная среда; запуск контейнера и сборка образа пока не проверялись на этой машине, потому что Docker CLI здесь недоступен.
-
-## Проверенный статус
-
-**160 тестов проходят**, включая batch из двух реальных worker, отмену процессов, recovery, адаптивный резерв, прежние acceptance и запуск распакованного ZIP из другой директории. Независимое ревью не нашло открытых P1/P2.
-
-Новая стратегия проверена через Ollama qwen3.5:9b на обеих полных публичных задачах:
-
-| Задача | Выбранная модель | Локальная holdout-метрика | Строк CSV |
-|---|---|---:|---:|
-| Регрессия | ExtraTrees | RMSE 45.32903 | 22 449 |
-| Классификация | CatBoostClassifier | Macro F1 0.56502 | 41 166 |
-
-У обеих задач успешны финальное обучение, независимая проверка CSV, загрузка модели и восстановление проекций через `--resume`. Ресурсные интервалы подтверждают до двух одновременных worker, настроенных по четыре потока. На регрессии все четыре LLM-кандидата упали, поэтому статус `degraded`; рабочий ExtraTrees из начального сравнения сохранён. На классификации успешно выполнено 5 LLM-кандидатов. Успешный опыт не обязательно улучшает результат. Это holdout-метрики, а не оценки скрытого теста платформы.
-
-Команды, результаты всех семейств и ограничения: [docs/VALIDATION.md](docs/VALIDATION.md), [машинные свидетельства](docs/validation/parallel-public-2026-10-19.json). Более ранние проверки MVP и журнала решений также сохранены в docs/validation/.
-
-API организаторов и Docker пока не проверены. MVP поддерживает supervised tabular CSV с выводом целевых значений или меток классов; неизвестные private-форматы и probability/multicolumn submissions требуют расширения. Supervisor и AST lint не заменяют OS security sandbox; жёсткие ограничения файлов, сети и суммарных ресурсов обеспечивает окружение запуска.
-
-Исследования и план сохранены в репозитории и не входят в runtime ZIP: [CASE_SUMMARY.md](CASE_SUMMARY.md), [DEEPSEEK_HARNESS_SUMMARY.md](DEEPSEEK_HARNESS_SUMMARY.md), [план](docs/tasks/automl-mvp/PLAN.md), [контракты](docs/tasks/automl-mvp/CONTRACTS.md).
+На текущей macOS-машине Docker CLI отсутствует, поэтому сборка и запуск контейнера здесь не подтверждены. Для отдельной изолированной среды обеспечьте ограничения CPU, памяти, сети и файловой системы на стороне среды запуска.
