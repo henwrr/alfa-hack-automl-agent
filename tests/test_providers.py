@@ -187,7 +187,7 @@ def test_ollama_uses_native_option_defaults_with_explicit_overrides():
             "qwen-local",
             extra_body={"options": {"num_ctx": 8192, "temperature": 0.7, "top_p": 0.9}},
         ).complete([], [], timeout=2, max_tokens=42)
-    assert seen[0][2]["options"] == {"num_ctx": 16384, "temperature": 0.2, "num_predict": 41}
+    assert seen[0][2]["options"] == {"num_ctx": 32768, "temperature": 0.2, "num_predict": 41}
     assert seen[1][2]["options"] == {"num_ctx": 8192, "temperature": 0.7, "top_p": 0.9, "num_predict": 42}
 
 

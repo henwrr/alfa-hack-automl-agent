@@ -235,7 +235,7 @@ class OllamaProvider(_HTTPProvider):
         extra_options = extra.pop("options", {})
         if not isinstance(extra_options, dict):
             raise ProviderError("Ollama options must be an object", code="invalid_request", retryable=False)
-        options = {"num_ctx": 16384, "temperature": 0.2, **extra_options}
+        options = {"num_ctx": 32768, "temperature": 0.2, **extra_options}
         options["num_predict"] = max_tokens
         payload: dict[str, Any] = {
             **extra,

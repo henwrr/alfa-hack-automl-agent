@@ -16,9 +16,13 @@ Core red:5поведенческихпаденийunknownrecipe/defaultinheritan
 - Новый RED `20261020T084659.205261Z-red.json` подтвердил потерю weight-only опыта из-за code-hash dedup. Исправление учитывает recipe hash, включающий fit_options.
 - Host blending tests исходно падали на stub; теперь проверяют OOF-полусумму двух противоположных ошибок, несовместимый split и отказ при нехватке refit времени. Численная погрешность CSV проверяется с tolerance1e-12.
 - Final ensemble helper: 9 passed; root интеграция `test_timefirst/test_ensemble_selection/test_final_ensemble/test_research_cv_agent`: 14 passed, 7.72s. Дополнительный test на единый shortlist/reserve.
-- Default trial timeout увеличен до 1800s, чтобы оставить сильным пятифолдным моделям время на обучение. Исследование может завершиться по deadline или после восьми успешных неулучшающих гипотез; один готовый опыт при большом остатке времени недостаточен.
+- Default trial timeout увеличен до 1800s, чтобы оставить сильным пятифолдным моделям время на обучение. Исследование ограничено deadline и оценкой возможности вместить следующий опыт; число неулучшающих гипотез само по себе его не завершает.
 
 ## Полная интеграция и live protocol
 - `pytest -q`: 337 passed, 2 прежних warnings, 76.63s; log `20261020T085213.071401Z-green.json`.
 - `scripts/verify_run.py` на synthetic CV run независимо пересчитал все 6 метрик, проверил worker overlap, полный refit и совпадение загруженной модели с submission; exit0.
 - Actual Ollama wire выявил double-encoded experiments + flat decision fields + один лишний закрывающий символ внутри строки. Первые два вызова были отклонены до fit; дополнительное исправление decoder проверяет точный saved wire без обучения. При этом параметры научно неверной гипотезы не изменяются и по-прежнему проверяются recipes.
+
+## Компактная история и остановка по времени
+- History/provider/research integration: 14 passed, 20.17s. Параметры и fit_options сохраняются в последней сбалансированной assistant/tool группе, подробные diagnostics не дублируются в tool result; оригинальные события не изменяются.
+- RED `20261020T092432.805172Z-red.json`: восемь неулучшающих опытов всё ещё завершали default run при 1200s остатка. Удалён этот косвенный trial limit; finish допустим, когда по измеренной длительности следующий опыт уже не помещается перед резервом. Green timefirst/history/providers: 12 passed, 5.56s (`20261020T092441.357743Z-green.json`).

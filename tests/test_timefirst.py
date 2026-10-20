@@ -18,7 +18,10 @@ def test_default_finish_keeps_researching_when_time_for_experiments_remains():
     with pytest.raises(ValueError,match='Time-first'):
         research._finish('Первый опыт готов')
     research.results.extend(ExperimentResult(f'trial_{i:04d}','ok','.',str(i),'stagnated',metric=2.,seconds=30.) for i in range(3,10))
-    assert research._finish('Восемь успешных гипотез не улучшили результат')['finished']
+    with pytest.raises(ValueError,match='Time-first'):
+        research._finish('Восемь успешных гипотез не улучшили результат')
+    research.budget=SimpleNamespace(research_remaining=lambda:40)
+    assert research._finish('Оставшегося времени недостаточно для следующего опыта')['finished']
 
 
 def test_reserve_covers_three_candidates_even_from_same_family():

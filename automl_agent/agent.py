@@ -53,6 +53,46 @@ def request_token_bound(messages, tools):
     return len(content.encode("utf-8")) + 1024 + 64 * len(messages)
 
 
+def recipe_feedback(result):
+    if not isinstance(result, dict) or not isinstance(result.get('value'), dict) or not isinstance(result['value'].get('trials'), list):
+        return result
+    value = result['value']
+    rows = [{k:row[k] for k in ('trial_id','status','metrics','error','seconds','selected') if k in row}
+            for row in value['trials'] if isinstance(row, dict)]
+    return {'ok':result.get('ok'), 'value':{'trials':rows, **{k:value[k] for k in ('selected_trial','best_metric') if k in value}}}
+
+
+def compact_recipe_history(step, schemas):
+    import copy
+    from .tools import _decode_schema_containers
+    compact = copy.deepcopy(step)
+    for message in compact:
+        if message.get('role') != 'assistant':
+            continue
+        message['content'] = (message.get('content') or '')[:600]
+        for call in message.get('tool_calls', []):
+            function = call.get('function', {})
+            if function.get('name') != 'run_model_experiments':
+                continue
+            try:
+                arguments = json.loads(function['arguments']) if isinstance(function.get('arguments'), str) else function['arguments']
+                arguments = _decode_schema_containers(arguments, schemas.get(function['name'], {}))
+                experiments = arguments.get('experiments')
+                if not isinstance(experiments, list):
+                    return []  # error feedback carries this malformed call; avoid teaching its bad wire format
+                compact_proposals = []
+                for row in experiments:
+                    if not isinstance(row, dict):
+                        return []
+                    item = {k:row[k] for k in ('base_trial_id','parameters','preprocessing','fit_options') if k in row}
+                    item['hypothesis'] = str(row.get('hypothesis',''))[:300]
+                    compact_proposals.append(item)
+                function['arguments'] = json.dumps({'experiments':compact_proposals}, ensure_ascii=False)
+            except (ValueError, TypeError, KeyError):
+                return []
+    return compact
+
+
 class ResearchRun:
     def __init__(self, config):
         initialized_at = time.monotonic()
@@ -261,11 +301,15 @@ class ResearchRun:
                 self.journal.append("tool_result", call_id=call["id"], name=function["name"], result=result)
                 self.tool_results[call["id"]] = result
             from .prompts import prompt_tool_result
-            self.feedback = json.dumps(prompt_tool_result(result), ensure_ascii=False, default=str)
+            value = recipe_feedback(result) if self.config.experiment_mode == 'recipe' else prompt_tool_result(result)
+            self.feedback = json.dumps(value, ensure_ascii=False, default=str)
             step_messages.append({"role": "tool", "tool_call_id": call["id"], "name": function["name"], "content": self.feedback})
             self.checkpoint()
         if history_safe:
-            self.recent_steps.append(step_messages)
+            if self.config.experiment_mode == 'recipe':
+                step_messages = compact_recipe_history(step_messages, {name:item[1] for name,item in registry.tools.items()})
+            if step_messages:
+                self.recent_steps.append(step_messages)
         self.journal.append("llm_response_consumed", request_id=request_id)
         self.checkpoint()
 
@@ -561,11 +605,8 @@ class ResearchRun:
             raise ValueError("Run at least one successful generated experiment before finishing")
         if self.config.max_trials is None and self.config.max_steps is None:
             generated = [r for r in self.results if r.status == 'ok' and not r.is_baseline]
-            best = select_best(self.results, self.task.maximize)
-            recent = generated[-8:]
-            converged = len(recent) == 8 and best not in recent
-            if not converged and self.budget.research_remaining() > max(30., 1.5*max((r.seconds for r in generated[-4:]), default=0)):
-                raise ValueError('Time-first research: continue evidence-driven experiments while research time remains. Early convergence requires eight successful non-improving candidates; finalization reserve is enforced by host.')
+            if self.budget.research_remaining() > max(30., 1.5*max((r.seconds for r in generated[-4:]), default=0)):
+                raise ValueError('Time-first research: continue evidence-driven experiments while research time remains, including after non-improving trials. Finish when another measured experiment no longer fits before the finalization reserve.')
         self.finish_requested = True
         self.stop_reason = "model_finished"
         self.journal.append("research_finished", source="llm", reason=reason)
@@ -609,7 +650,7 @@ class ResearchRun:
         for request_id, response in self.pending_responses:
             self.journal.append("llm_response_recovered", request_id=request_id)
             self._dispatch_response(request_id, response, registry, allow_legacy=True)
-        compact = False
+        compact = mode == 'recipe'
         while len(self.results) < self.config.trial_limit and self.steps < self.config.step_limit and not self.finish_requested:
             if self.tokens_used >= self.config.max_tokens:
                 self.stop_reason = "token_budget"
@@ -627,7 +668,7 @@ class ResearchRun:
                                       feedback=self.feedback, context_chars=self.config.context_chars, compact=compact)
             # Keep complete recent assistant/tool groups. Older attempts remain
             # available through the structured ledger and the durable journal.
-            for step_messages in self.recent_steps[-(1 if compact else 2):]:
+            for step_messages in self.recent_steps[-(1 if compact or mode == 'recipe' else 2):]:
                 messages.extend(step_messages)
             estimate = request_token_bound(messages, registry.schemas())
             available_tokens = self.config.max_tokens - self.tokens_used - estimate
