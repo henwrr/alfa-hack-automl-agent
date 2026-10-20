@@ -1,0 +1,42 @@
+{
+  "date": "2026-10-20",
+  "worktree": "/Users/egoraprelsky/.codex/worktrees/research-boosting/alfa_hackathon",
+  "base_ref": "6f0198c43f7afc24e9af74f4c1de5716df7ae3c3",
+  "python": "/Users/egoraprelsky/Desktop/coding/alfa_hackathon/.venv/bin/python",
+  "optional_package_versions": {
+    "catboost": "1.2.8",
+    "lightgbm": "4.6.0",
+    "xgboost": "2.1.4"
+  },
+  "red_run": {
+    "command": "python -m pytest tests/test_boosting_recipes.py -q -k 'initial_recipes_include or normalization_defaults_and_fingerprints or generated_boosting_source'",
+    "exit_code": 1,
+    "failed": 9,
+    "reason": "The API had no LightGBM/XGBoost families, fit options, initial research recipes, or native standalone source generators."
+  },
+  "green_run": {
+    "command": "python -m pytest tests/test_boosting_recipes.py tests/test_recipes.py tests/test_families.py tests/test_recipe_agent.py -q",
+    "exit_code": 0,
+    "passed": 105,
+    "failed": 0,
+    "skipped": 0,
+    "warnings": [
+      "Two SAGA ConvergenceWarning instances on existing tiny Linear classification fixtures."
+    ]
+  },
+  "verified": [
+    "Strong initial recipes and package-profile filtering with Linear fallback",
+    "Strict native parameter ranges and host-controlled CPU/thread/seed settings",
+    "Host fit_options defaults, validation, conflict rejection, and fingerprint coverage",
+    "LightGBM and XGBoost candidate lint and standalone source generation",
+    "Tiny classification and regression fit/predict on mixed data, NaN/inf, and unseen categories",
+    "Integer-coded XGBoost classification targets, probability shape, and joblib round trips",
+    "Recipe import does not eagerly import LightGBM or XGBoost",
+    "Legacy CatBoost default and prior recipe, family, and agent tests"
+  ],
+  "limitations": [
+    "No public dataset or Ollama run in this worktree.",
+    "No full project suite or expensive full-size fit.",
+    "The companion host training helper is responsible for applying sample weights, inner validation, early stopping, and XGBoost label decoding."
+  ]
+}
