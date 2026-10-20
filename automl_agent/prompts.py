@@ -29,7 +29,7 @@ Use run_model_experiments with experiments:[{hypothesis,base_trial_id,parameters
 Select the base by its measured metric, runtime and actual model_details.parameters. Omitted parameters inherit the base, including CatBoost's measured automatic learning_rate. Change one factor at a time or explain an interaction. Do not silently replace a strong native learning rate with a familiar small constant. More iterations and a much lower rate can underfit; one worse validation score alone does not prove overfitting. For boosting use fit_options.early_stopping_rounds: the host creates a separate train-only inner eval_set and refits each outer train fold using the selected number of trees. OOF labels never enter fitting or early stopping. Constructor sample_weight is invalid; fit_options.sample_weight supports balanced or sqrt_balanced row weights for CLASSIFICATION ONLY. Never combine row and constructor class weights.
 For imbalanced classification and macro_f1, prioritize an untested comparison of CatBoost auto_class_weights="Balanced" and "SqrtBalanced" against the same measured unweighted base, retaining learning_rate/iterations. For ExtraTrees/Linear use class_weight="balanced". For LightGBM/XGBoost use fit_options.sample_weight="balanced" or "sqrt_balanced"; avoid double weighting. These are real training weights. class_weights="Balanced" and constructor sample_weight are invalid; y_train is not in context. Do not retry the same failed recipe under a new name.
 For regression with missing numeric data, consider one controlled add_missing_indicators=true study on ExtraTrees/Linear. CatBoost handles missing values natively. For bounded trees compare capacity (max_leaf_nodes/min_samples_leaf) with the current winning values before making trees even smaller. Respect measured process times and remaining time; do not assume linear scaling guarantees completion. Try fewer substantial, independent changes rather than many contradictory parameter changes.
-In decision give concise PUBLIC Russian explanations: model_family, observations, rationale, alternatives, expected_effect, risks, previous_result_assessment. Distinguish observed facts from expectations; do not supply private internal reasoning. hypothesis and finish reason must be Russian. Use available research time for evidence-driven experiments rather than finishing after the first successful edit. Inspect validation_plan, dataset_diagnostics, per-class confusion/errors, regression segments and feature importance; explain which observed error motivates each edit. Feature importance is associative, not causal. Stop at the reserved deadline or after measured convergence. With temporal CV, treat earlier-period scores as transfer estimates, not iid performance. Host OOF blending and Macro F1 calibration are evaluated separately after research. Return native tool calls or exact JSON {"tool":"run_model_experiments","arguments":{"experiments":[...]}}.
+In decision give concise PUBLIC Russian explanations: model_family, observations, rationale, alternatives, expected_effect, risks, previous_result_assessment. Distinguish observed facts from expectations; do not supply private internal reasoning. hypothesis and finish reason must be Russian. Use available research time for evidence-driven experiments rather than finishing after the first successful edit. Inspect validation_plan, dataset_diagnostics, per-class confusion/errors, regression segments and feature importance; explain which observed error motivates each edit. Feature importance is associative, not causal. Continue proposing measured experiments until the reserved deadline; stop only when the host reports that the reserve is reached or remaining time cannot fit another measured experiment. With temporal CV, treat earlier-period scores as transfer estimates, not iid performance. Host OOF blending and Macro F1 calibration are evaluated separately after research. Return native tool calls or exact JSON {"tool":"run_model_experiments","arguments":{"experiments":[...]}}.
 """
 
 
@@ -82,7 +82,315 @@ def _read_code(result, limit=18000):
     return path.read_text(encoding="utf-8")[:limit] if path.exists() else ""
 
 
+def _clip_text(value, limit):
+    value = str(value or "")
+    if len(value) <= limit:
+        return value
+    if limit <= 32:
+        return value[:limit]
+    head = (limit - 24) * 2 // 3
+    tail = limit - 24 - head
+    return value[:head] + "\n[… контекст сокращён …]\n" + value[-tail:]
+
+
+def _compact_recipe_diagnostics(diagnostics, level):
+    """Keep decision-relevant diagnostics while dropping fold-level noise."""
+    diagnostics = diagnostics or {}
+    keep = {}
+    validation = diagnostics.get("validation")
+    if isinstance(validation, dict):
+        fields = ("strategy", "coverage", "mean", "std", "fold_count", "warning", "warnings")
+        keep["validation"] = {key: validation[key] for key in fields if key in validation}
+        folds = validation.get("folds")
+        if isinstance(folds, list):
+            keep["validation"]["folds"] = [
+                {key: row[key] for key in ("fold", "rows", "metric") if key in row}
+                for row in folds[: min(5, max(2, 6 - level))] if isinstance(row, dict)
+            ]
+    if "per_class" in diagnostics:
+        rows = diagnostics.get("per_class") or []
+        keep["per_class"] = [
+            {key: row[key] for key in ("label", "precision", "recall", "f1", "support", "predicted") if key in row}
+            for row in rows[: max(4, 20 - level * 3)] if isinstance(row, dict)
+        ]
+        for key in ("total_classes", "classes_partial"):
+            if key in diagnostics:
+                keep[key] = diagnostics[key]
+    if "segments" in diagnostics:
+        keep["segments"] = (diagnostics.get("segments") or [])[:max(2, 8 - level)]
+    importance = diagnostics.get("feature_importance")
+    if isinstance(importance, dict):
+        keep["feature_importance"] = {
+            key: importance[key] for key in ("method", "interpretation", "status", "feature_count") if key in importance
+        }
+        items = importance.get("items") or []
+        keep["feature_importance"]["items"] = items[:max(3, 10 - level * 2)]
+    return keep
+
+
+def _recipe_catalog_context(task_type, profile, results, maximize=True):
+    from .recipes import recipe_catalog
+
+    catalog = recipe_catalog(task_type)
+    packages = profile.get("available_packages", {})
+    package_names = {
+        "CatBoost": "catboost", "LightGBM": "lightgbm", "XGBoost": "xgboost",
+        "ExtraTrees": "scikit-learn", "Linear": "scikit-learn",
+    }
+    for section in ("families", "boosting_families"):
+        families = catalog.get(section, {})
+        for family in list(families):
+            package = package_names.get(family)
+            version = packages.get(package) if package else None
+            if version is not None and str(version).lower() in {"unavailable", "none", "not installed", "false"}:
+                families.pop(family, None)
+
+    # Field descriptions already state the host contract. Keep the actual supported
+    # schema verbatim so ranges, null defaults and enum options remain authoritative.
+    fit_options = catalog.get("fit_options", {})
+    catalog["fit_options"] = {"options": fit_options.get("options", {})}
+    catalog.pop("host_controlled", None)
+    catalog.pop("unsupported", None)
+
+    best_by_family = {}
+    for result in results:
+        recipe = getattr(result, "recipe", None)
+        if result.status != "ok" or not isinstance(recipe, dict):
+            continue
+        family = recipe.get("family")
+        previous = best_by_family.get(family)
+        better = previous is None or (result.metric is not None and
+                                       (previous["metric"] is None or
+                                        (result.metric > previous["metric"] if maximize else result.metric < previous["metric"])))
+        if better:
+            details = result.model_details or {}
+            best_by_family[family] = {
+                "family": family, "trial_id": result.trial_id, "metric": result.metric,
+                "parameters": details.get("parameters", {}),
+            }
+    if best_by_family:
+        catalog["measured_bases"] = list(best_by_family.values())
+    return catalog
+
+
+def _recipe_profile_context(profile, level):
+    facts = _profile_facts(profile)
+    facts.pop("feature_summary", None)
+    summary = _profile_facts(profile).get("feature_summary", [])
+    summary_count = max(0, (12, 8, 6, 4, 2, 0)[min(level, 5)])
+    if summary_count:
+        facts["feature_summary"] = summary[:summary_count]
+    if isinstance(facts.get("categorical_columns"), list):
+        category_cap = (20, 16, 12, 10, 8, 5)[min(level, 5)]
+        facts["categorical_column_count"] = len(facts["categorical_columns"])
+        facts["categorical_columns"] = facts["categorical_columns"][:category_cap]
+
+    target = facts.get("target")
+    if isinstance(target, dict):
+        # Target counts are central for imbalanced classification and stay exact.
+        target = {key: target[key] for key in ("name", "dtype", "unique", "class_counts", "counts") if key in target}
+        facts["target"] = target
+
+    plan = facts.get("validation_plan")
+    if isinstance(plan, dict):
+        fields = ("strategy", "fold_count", "coverage", "time_column", "warnings", "groups", "repeated_entity_count")
+        facts["validation_plan"] = {key: plan[key] for key in fields if key in plan}
+        if isinstance(facts["validation_plan"].get("warnings"), list):
+            facts["validation_plan"]["warnings"] = facts["validation_plan"]["warnings"][:3]
+
+    diagnostics = facts.get("dataset_diagnostics")
+    if isinstance(diagnostics, dict):
+        temporal = diagnostics.get("temporal_candidates", [])
+        diagnostics["temporal_candidates"] = temporal[:max(1, 4 - level)] if isinstance(temporal, list) else temporal
+        adversarial = diagnostics.get("adversarial_cv")
+        if isinstance(adversarial, dict):
+            diagnostics["adversarial_cv"] = {
+                key: adversarial[key] for key in
+                ("status", "metric", "roc_auc_mean", "roc_auc_std", "mean", "std", "fold_roc_auc", "rows", "feature_count")
+                if key in adversarial
+            }
+        shift = diagnostics.get("feature_shift", {})
+        if isinstance(shift, dict):
+            shift_limit = max(2, 8 - level)
+            diagnostics["feature_shift"] = {
+                name: {key: value[key] for key in ("shift", "missing_delta", "mean_shift", "std_shift") if key in value}
+                for name, value in list(shift.items())[:shift_limit] if isinstance(value, dict)
+            }
+    return facts
+
+
+def _recipe_task_context(task, runtime_context, level):
+    task_data = task.model_context(runtime_context.get("n_jobs", 4))
+    feature_columns = task_data.get("feature_columns", [])
+    categorical = task_data.get("categorical_columns", [])
+    feature_cap = (200, 80, 40, 20, 0, 0)[min(level, 5)]
+    category_cap = (40, 24, 16, 10, 0, 0)[min(level, 5)]
+    task_data["feature_count"] = len(feature_columns)
+    task_data["categorical_count"] = len(categorical)
+    if len(feature_columns) > feature_cap:
+        task_data["feature_columns"] = feature_columns[:feature_cap]
+        task_data["feature_columns_truncated"] = True
+    if len(categorical) > category_cap:
+        task_data["categorical_columns"] = categorical[:category_cap]
+        task_data["categorical_columns_truncated"] = True
+    return task_data
+
+
+def _build_recipe_messages(task, profile, results, best, runtime_context, feedback, context_chars, compact):
+    """Construct a bounded, recipe-only prompt without changing the code-mode path."""
+    limit = max(5000, context_chars // 2) if compact else max(5000, context_chars)
+    latest = results[-1] if results else None
+    description = task.description or ""
+    catalog = _recipe_catalog_context(task.task_type, profile, results, task.maximize)
+    constraints = (
+        "REGRESSION: numeric target, optimize " + task.metric +
+        ". Feature categories are NOT target classes. Never use class balancing or classification weights."
+        if task.task_type == "regression" else
+        "CLASSIFICATION: optimize " + task.metric +
+        ". Class weighting applies to target labels only; inspect per-class metrics and confusion errors."
+    )
+    pipeline_contract = {
+        "CatBoost": "Numeric NaN is preserved; categories are cleaned to strings and handled natively.",
+        "ExtraTrees/LightGBM/XGBoost": "Numeric median imputation; categorical missing sentinel and sparse one-hot. Indicators are optional.",
+        "Linear": "Median imputation, sparse categorical one-hot and uncentered numeric scaling.",
+    }
+
+    def make_content(level):
+        description_limit = (9000, 6500, 4500, 3000, 1800, 500)[min(level, 5)]
+        description_value = _clip_text(description, description_limit)
+        feedback_limit = (5000, 3500, 2200, 1400, 800, 400)[min(level, 5)] if compact else 5000
+        hypothesis_limit = (450, 350, 260, 180, 100, 28)[min(level, 5)]
+        experiments = []
+        for result in results:
+            row = {"trial_id": result.trial_id, "status": result.status,
+                   "hypothesis": _clip_text(result.hypothesis, hypothesis_limit), "metric": result.metric}
+            if result is best:
+                row["recipe"] = result.recipe
+            experiments.append(row)
+
+        def experiment_detail(result, include_error=False):
+            if result is None:
+                return None
+            detail = {
+                "trial_id": result.trial_id, "status": result.status,
+                "hypothesis": _clip_text(result.hypothesis, hypothesis_limit), "metric": result.metric,
+                "recipe": result.recipe,
+                "model_details": {
+                    key: result.model_details[key] for key in ("class", "parameters", "parameters_source")
+                    if key in (result.model_details or {})
+                },
+                "diagnostics": _compact_recipe_diagnostics(result.diagnostics, level),
+            }
+            if include_error and result.error:
+                error_limit = (5000, 4000, 3200, 2600, 1600, 950)[min(level, 5)]
+                detail["error"] = _clip_text(result.error, error_limit)
+            return detail
+
+        best_summary = experiment_detail(best)
+        latest_summary = experiment_detail(latest, include_error=bool(latest and latest.status != "ok"))
+        if best is latest and latest_summary is not None:
+            latest_summary = {"trial_id": best.trial_id, "status": best.status, "same_as_best": True}
+            if best.status != "ok" and best.error:
+                latest_summary["error"] = _clip_text(best.error, (5000, 4000, 3200, 2600, 1600, 950)[min(level, 5)])
+
+        comparison = profile.get("family_comparison", {}) or {}
+        comparison_rows = []
+        for row in comparison.get("trials", []):
+            if not isinstance(row, dict):
+                continue
+            compact_row = {key: row[key] for key in ("family", "trial_id", "status", "metric", "seconds") if key in row}
+            details = row.get("model_details", {})
+            if isinstance(details, dict):
+                compact_row["model_details"] = {key: details[key] for key in ("class", "parameters", "parameters_source") if key in details}
+            comparison_rows.append(compact_row)
+        strategy = profile.get("research_strategy", {}) or {}
+        strategy_facts = strategy.get("facts", {}) if level < 3 else {}
+        shortlist = strategy.get("candidate_shortlist", [])
+        strategy_compact = {
+            "facts": strategy_facts,
+            "candidate_shortlist": [{"model_family": item.get("model_family")}
+                                    for item in shortlist[:5] if isinstance(item, dict) and item.get("model_family")],
+        }
+        content = {
+            "task_description": description_value,
+            "task": _recipe_task_context(task, runtime_context, level),
+            "data_profile": _recipe_profile_context(profile, level),
+            "task_constraints": constraints,
+            "model_catalog": catalog,
+            "pipeline_contract": pipeline_contract,
+            "research_strategy": strategy_compact,
+            "experiments": experiments,
+            "best_experiment": best_summary,
+            "latest_experiment": latest_summary,
+            "family_comparison": {"trials": comparison_rows, "selected_trial": comparison.get("selected_trial")},
+            "best_code": "", "last_failed_code": "", "runtime": runtime_context,
+            "previous_tool_feedback": _clip_text(feedback, feedback_limit),
+        }
+        return content
+
+    # Start with informative context, then drop secondary details in fixed stages.
+    content = None
+    encoded = ""
+    for level in range(6):
+        content = make_content(level)
+        encoded = json.dumps(content, ensure_ascii=False, allow_nan=False, default=str)
+        if len(encoded) <= limit:
+            break
+
+    if len(encoded) > limit:
+        # Last-resort payload retains the facts that change a recipe decision.
+        # Most user-provided text is summarized, while exact recipe and measured
+        # parameter values, class counts, metric, validation design and latest error stay.
+        core = {
+            "task": {key: value for key, value in content["task"].items()
+                     if key in {"task_type", "metric", "target", "classes", "seed", "n_jobs", "feature_count", "categorical_count"}},
+            "task_constraints": content["task_constraints"],
+            "data_profile": {
+                key: content["data_profile"][key] for key in
+                ("task_type", "metric", "target", "validation_plan", "available_packages", "dataset_diagnostics")
+                if key in content["data_profile"]
+            },
+            "model_catalog": content["model_catalog"],
+            "best_experiment": content["best_experiment"],
+            "latest_experiment": content["latest_experiment"],
+            "experiments": [{key: row.get(key) for key in ("trial_id", "status", "metric", "recipe") if key in row}
+                            for row in content["experiments"]],
+            "family_comparison": content["family_comparison"],
+            "last_failed_code": "",
+            "runtime": runtime_context,
+        }
+        encoded = json.dumps(core, ensure_ascii=False, allow_nan=False, default=str)
+        if len(encoded) > limit:
+            # Oversized rare-label/diagnostic payloads get a bounded record with exact
+            # target counts and tested parameters. Keep a useful error excerpt.
+            best_row = content["best_experiment"] or {}
+            latest_row = content["latest_experiment"] or {}
+            compact_best = {key: best_row.get(key) for key in ("trial_id", "status", "metric", "recipe", "model_details") if key in best_row}
+            compact_latest = {key: latest_row.get(key) for key in ("trial_id", "status", "metric", "same_as_best", "error") if key in latest_row}
+            core["best_experiment"] = compact_best
+            core["latest_experiment"] = compact_latest
+            core["data_profile"].pop("validation_plan", None)
+            core["model_catalog"] = {"task_type": task.task_type}
+            encoded = json.dumps(core, ensure_ascii=False, allow_nan=False, default=str)
+        if len(encoded) > limit:
+            # The core recipe/diagnostics are normally small; this guard bounds pathological
+            # descriptions and errors while preserving task, latest failure and model params.
+            core["best_experiment"] = _clip_text(json.dumps(core["best_experiment"], ensure_ascii=False, default=str), max(300, limit // 5))
+            core["latest_experiment"] = _clip_text(json.dumps(core["latest_experiment"], ensure_ascii=False, default=str), max(300, limit // 5))
+            core["model_catalog"] = {"task_type": task.task_type}
+            encoded = json.dumps(core, ensure_ascii=False, allow_nan=False, default=str)
+
+    system_prompt = RECIPE_SYSTEM_PROMPT
+    if task.task_type == "regression":
+        system_prompt = "\n".join(line for line in system_prompt.splitlines()
+                                  if not line.startswith("For imbalanced classification and macro_f1"))
+        system_prompt = "This task is REGRESSION with a numeric target. Do NOT use any class balancing or classification weights. Categorical feature levels are NOT target classes. Native parameter metadata can include irrelevant weight placeholders; the regression model_catalog is authoritative.\n" + system_prompt
+    return [{"role": "system", "content": system_prompt}, {"role": "user", "content": encoded}]
+
+
 def build_messages(task, profile, results, best, runtime_context, feedback="", context_chars=48000, compact=False):
+    if runtime_context.get("experiment_mode") == "recipe":
+        return _build_recipe_messages(task, profile, results, best, runtime_context, feedback, context_chars, compact)
     ledger = [{"trial_id": r.trial_id, "status": r.status, "hypothesis": r.hypothesis[:1500], "metric": r.metric,
                "seconds": round(r.seconds, 2), "model_details": r.model_details, "recipe": getattr(r, "recipe", None),
                "parent_trial_id": getattr(r, "parent_trial_id", None), "diagnostics": getattr(r, "diagnostics", {}), "error": (r.error or "")[-2500:]} for r in results]
