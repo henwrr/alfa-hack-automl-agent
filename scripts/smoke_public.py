@@ -73,6 +73,8 @@ def main(argv: list[str] | None = None) -> int:
             str(solution),
             str(task),
             "--offline",
+            "--cv-folds", "1",
+            "--family-trials", "1",
             "--time-budget",
             str(args.time_budget),
             "--max-trials",

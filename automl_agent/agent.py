@@ -278,6 +278,19 @@ class ResearchRun:
         best = select_best(self.results, self.task.maximize)
         plan = plan_finalization(total_seconds=self.config.time_budget, validation_fraction=self.task.validation_fraction,
                                  best=best, train_rows=(self.profile or {}).get('train_shape', [None])[0])
+        if getattr(self, 'split', None) and self.split.get('mode') == 'evaluate_cv':
+            valid = [r for r in self.results if r.status == 'ok' and r.metric is not None]
+            valid.sort(key=lambda r:-r.metric if self.task.maximize else r.metric)
+            from .ensemble import ensemble_shortlist
+            costs = []
+            for result in ensemble_shortlist(valid):
+                estimate = result.model_details.get('training', {}).get('estimated_refit_seconds')
+                if isinstance(estimate, (int,float)) and estimate > 0:
+                    costs.append(estimate)
+            if costs:
+                projected = sum(costs)*1.5 + plan['overhead_seconds']
+                plan['potential_ensemble_fit_seconds'] = sum(costs)*1.5
+                plan['reserve_seconds'] = min(self.config.time_budget, max(plan['reserve_seconds'], projected))
         previous = getattr(self, 'reserve_plan', None)
         self.reserve_plan = plan
         self.budget.reserve_seconds = plan['reserve_seconds']
@@ -294,7 +307,8 @@ class ResearchRun:
         if remaining <= 0:
             raise ValueError('Research deadline reached; finalization time is reserved')
         code_hash = hashlib.sha256(code.encode()).hexdigest()
-        if any(r.code_hash == code_hash for r in [*self.results, *self.active_trials.values()]):
+        if any(r.code_hash == code_hash and (recipe_hash is None or r.recipe_hash == recipe_hash)
+               for r in [*self.results, *self.active_trials.values()]):
             raise ValueError('Duplicate code: propose a different hypothesis or fix the previous error')
         trial_id = self._next_trial_id()
         directory = self.directory / trial_id
@@ -550,7 +564,7 @@ class ResearchRun:
             best = select_best(self.results, self.task.maximize)
             recent = generated[-8:]
             converged = len(recent) == 8 and best not in recent
-            if not converged and self.budget.research_remaining() > max(self.config.trial_timeout, 2*max((r.seconds for r in generated[-2:]), default=0)):
+            if not converged and self.budget.research_remaining() > max(30., 1.5*max((r.seconds for r in generated[-4:]), default=0)):
                 raise ValueError('Time-first research: continue evidence-driven experiments while research time remains. Early convergence requires eight successful non-improving candidates; finalization reserve is enforced by host.')
         self.finish_requested = True
         self.stop_reason = "model_finished"
@@ -671,6 +685,24 @@ class ResearchRun:
             "code_path": str(directory / "code.py"), "artifact_dir": str(directory), "save_model": True,
             "fit_options": (best.recipe or {}).get("fit_options", {}),
             "iteration_override": best.model_details.get("training", {}).get("final_iterations")}
+        plan = getattr(self, 'postprocessing_plan', {})
+        if plan.get('accepted'):
+            members, weights = [], []
+            for index, (trial_id, weight) in enumerate(zip(plan['member_trial_ids'], plan['weights'])):
+                if weight <= 0:
+                    continue
+                result = next(r for r in self.results if r.trial_id == trial_id)
+                member_source = Path(result.artifact_dir)/'code.py'
+                if hashlib.sha256(member_source.read_bytes()).hexdigest() != result.code_hash:
+                    raise ValueError('Ensemble member source checksum changed')
+                member_code = directory/f'code_member_{index}.py'
+                member_code.write_text(member_source.read_text(encoding='utf-8'), encoding='utf-8')
+                members.append({'trial_id':trial_id, 'code_path':str(member_code),
+                     'fit_options':(result.recipe or {}).get('fit_options',{}),
+                     'iteration_override':result.model_details.get('training',{}).get('final_iterations')})
+                weights.append(weight)
+            manifest.update(mode='finalize_ensemble', members=members, weights=weights,
+                            class_multipliers=plan['class_multipliers'])
         atomic_write_json(directory / "manifest.json", manifest)
         self.journal.append("final_fit_started", trial_id=best.trial_id, artifact_dir=str(directory), reserve_plan=self.reserve_plan, timeout_seconds=max(0.1, self.budget.remaining() - write_margin))
         self.checkpoint()
@@ -768,6 +800,20 @@ class ResearchRun:
             if not self.config.offline:
                 self.research()
             best = select_best(self.results, self.task.maximize)
+            self.postprocessing_plan = {'accepted':False, 'reason':'no_time_or_oof'}
+            if self.split.get('mode') == 'evaluate_cv' and self.budget.remaining() > self.reserve_plan.get('overhead_seconds', 0) + 2:
+                from .ensemble import choose_postprocessing
+                try:
+                    self.postprocessing_plan = choose_postprocessing(self.task, self.split, self.results, self.directory,
+                        remaining_seconds=self.budget.remaining(), overhead_seconds=self.reserve_plan.get('overhead_seconds', 5))
+                    if self.postprocessing_plan.get('accepted'):
+                        from .evaluation import publish_submission
+                        publish_submission(self.task, Path(self.postprocessing_plan['prediction_path']), self.output)
+                except Exception as exc:
+                    self.postprocessing_plan = {'accepted':False, 'reason':'postprocessing_error', 'error':str(exc)[-1000:]}
+                atomic_write_json(self.directory/'postprocessing.json', self.journal.redact(self.postprocessing_plan))
+                self.journal.append('postprocessing_selected', plan=self.postprocessing_plan)
+                self.checkpoint()
             final_fit = self.finalize(best)
         except KeyboardInterrupt:
             self.stop_reason = "interrupted"
@@ -790,6 +836,7 @@ class ResearchRun:
                   "submission_path": str(self.output), "run_dir": str(self.directory), "final_fit": final_fit, "validation": validation,
                   "decision_log": str(self.directory / "agent.log"), "decisions_path": str(self.directory / "decisions.jsonl"),
                   "reserve_plan": self.reserve_plan, "parallel_trials": self.config.parallel_trials,
+                  "postprocessing": getattr(self, "postprocessing_plan", {}), "validation_plan": self.profile.get("validation_plan", {}),
                   "threads_per_trial": self.config.n_jobs, "family_comparison_path": str(self.directory / "family_comparison.json")}
         report = self.journal.redact(report)
         atomic_write_json(self.directory / "report.json", report)

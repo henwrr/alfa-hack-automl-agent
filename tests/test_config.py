@@ -32,6 +32,7 @@ def test_default_research_is_limited_by_time_not_six_trials():
     assert config.trial_limit == float('inf')
     assert config.step_limit == float('inf')
     assert config.cv_folds == 5 and config.family_trials == 4
+    assert config.trial_timeout == 1800
     assert config.validation_strategy == 'auto'
 
 

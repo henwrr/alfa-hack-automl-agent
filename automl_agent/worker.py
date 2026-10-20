@@ -391,6 +391,9 @@ def _run_manifest(manifest_path: Path) -> dict:
     if not isinstance(manifest, dict):
         raise ValueError("Manifest должен быть JSON-объектом")
     mode = manifest.get("mode")
+    if mode == "finalize_ensemble":
+        from .final_ensemble import run_final_ensemble
+        return run_final_ensemble(manifest)
     if mode == "evaluate_cv":
         from .cv_worker import run_cv_manifest
         return run_cv_manifest(manifest)

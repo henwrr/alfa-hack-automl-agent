@@ -40,7 +40,7 @@ def test_cv_research_fits_two_edits_and_refits_selected_configuration(tmp_path, 
             assert 'dataset_diagnostics' in content['data_profile']
             base=next(r for r in content['experiments'] if r['recipe']['family']=='ExtraTrees')
             assert base['diagnostics']['validation']['coverage']==1
-            changes=[{'n_estimators':12},{'n_estimators':14}]
+            changes=[{} if classification else {'n_estimators':12},{'n_estimators':14}]
             args={'experiments':[{'hypothesis':'Проверить число деревьев по OOF','base_trial_id':base['trial_id'],'parameters':change,
                     **({'fit_options':{'sample_weight':'sqrt_balanced'}} if classification else {})} for change in changes]}
             name='run_model_experiments'

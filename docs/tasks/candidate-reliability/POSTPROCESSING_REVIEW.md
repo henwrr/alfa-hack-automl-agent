@@ -50,3 +50,5 @@ the candidate list to the family-diverse entries represented in the reserve.
 No other P1/P2 issue was found in the reviewed baseline/assessed/calibrated
 score flow, OOF fold alignment, temporal rule, or positive-weight final refit
 path.
+
+Root: условный P2 устранён. Выбор списка потенциальных участников вынесен в общий `ensemble_shortlist`; и резерв, и postprocessing используют один и тот же список, включая дополнение повторными семействами. Добавлен regression test на резерв для трёх моделей одного семейства.

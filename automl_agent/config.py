@@ -19,7 +19,7 @@ class Config:
     model: str
     api_key: str
     time_budget: float = 10800
-    trial_timeout: float = 900
+    trial_timeout: float = 1800
     llm_timeout: float = 180
     max_trials: int | None = None
     max_steps: int | None = None
@@ -68,7 +68,7 @@ def parse_config(argv=None) -> Config:
     parser = argparse.ArgumentParser(description="Autonomous tabular ML research agent; writes submission.csv beside task.md")
     parser.add_argument("task_path", nargs="?", default="task.md", type=Path)
     parser.add_argument("--time-budget", type=float, default=10800, help="Total wall time in seconds, at most 10800")
-    parser.add_argument("--trial-timeout", type=float, default=900)
+    parser.add_argument("--trial-timeout", type=float, default=1800)
     parser.add_argument("--llm-timeout", type=float, default=180)
     parser.add_argument("--max-trials", type=int, default=None, help="Optional cap including baseline and failed trials; default uses the time budget")
     parser.add_argument("--max-steps", type=int, default=None)
