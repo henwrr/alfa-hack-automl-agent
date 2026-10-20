@@ -8,11 +8,21 @@
     "flat_decision_metadata": ["model_family", "observations", "previous_result_assessment"]
   },
   "red": {
-    "new_behavior_tests_failing_before_implementation": 5
+    "new_behavior_tests_failing_before_implementation": 5,
+    "stray_closer_repair_test_failing_before_followup": 1
   },
   "green": {
     "command": "/Users/egoraprelsky/Desktop/coding/alfa_hackathon/.venv/bin/python -m pytest -q tests/test_tools.py",
-    "result": "15 passed"
+    "result": "20 passed"
+  },
+  "saved_wire_dry_run": {
+    "schema_event_seq": 34,
+    "tool_call_seq": 36,
+    "registered_callback_without_fit": true,
+    "registry_execute_ok": true,
+    "captured_experiments": 2,
+    "decision_metadata_normalized": true,
+    "regression_catboost_auto_class_weights_preserved_for_recipes": "Balanced"
   },
   "other_checks": {
     "compileall": "passed",

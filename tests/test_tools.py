@@ -162,6 +162,32 @@ def test_native_model_experiment_arrays_remain_accepted():
     assert calls == [experiment]
 
 
+@pytest.mark.parametrize("suffix", ["}", "}}"])
+def test_encoded_container_with_up_to_two_stray_closing_braces_is_repaired(suffix):
+    registry, calls = _model_experiment_registry()
+    experiment = {"hypothesis": "One", "base_trial_id": "trial_0001"}
+    encoded = json.dumps([experiment]) + suffix
+
+    result = registry.execute("run_model_experiments", {"experiments": encoded})
+
+    assert result["ok"]
+    assert result["value"] == [experiment]
+    assert calls == [experiment]
+
+
+@pytest.mark.parametrize("suffix", [" {\"unsafe\":1}", "garbage", "]}}}"])
+def test_encoded_container_rejects_nonclosing_or_excess_trailing_data(suffix):
+    registry, calls = _model_experiment_registry()
+    encoded = json.dumps([{"hypothesis": "One", "base_trial_id": "trial_0001"}]) + suffix
+
+    result = registry.execute("run_model_experiments", {"experiments": encoded})
+
+    assert not result["ok"]
+    assert result["error"]["code"] == "INVALID_ARGUMENTS"
+    assert "expected=array" in result["error"]["message"]
+    assert calls == []
+
+
 def test_tool_schema_is_enforced_before_side_effect():
     calls = []
     registry = ToolRegistry()

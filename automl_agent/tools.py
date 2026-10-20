@@ -37,6 +37,27 @@ def _schema_types(schema):
     return set()
 
 
+def _decode_encoded_container(value, expected):
+    """Decode one JSON object/array, allowing at most two stray closing brackets."""
+    try:
+        decoded = json.loads(value)
+    except (ValueError, TypeError, RecursionError):
+        start = len(value) - len(value.lstrip())
+        try:
+            decoded, end = json.JSONDecoder().raw_decode(value, start)
+        except (ValueError, TypeError, RecursionError):
+            return value
+        trailing = value[end:].strip()
+        if not 1 <= len(trailing) <= 2 or any(char not in "]}" for char in trailing):
+            return value
+
+    if isinstance(decoded, dict) and "object" in expected:
+        return decoded
+    if isinstance(decoded, list) and "array" in expected:
+        return decoded
+    return value
+
+
 def _decode_schema_containers(value, schema, depth=0):
     """Decode JSON strings only at schema locations requiring object/array."""
     if not isinstance(schema, dict) or depth >= _MAX_CONTAINER_DECODE_DEPTH:
@@ -44,14 +65,7 @@ def _decode_schema_containers(value, schema, depth=0):
 
     expected = _schema_types(schema)
     if isinstance(value, str) and expected.intersection({"object", "array"}):
-        try:
-            decoded = json.loads(value)
-        except (ValueError, TypeError, RecursionError):
-            decoded = value
-        if isinstance(decoded, dict) and "object" in expected:
-            value = decoded
-        elif isinstance(decoded, list) and "array" in expected:
-            value = decoded
+        value = _decode_encoded_container(value, expected)
 
     if isinstance(value, dict) and "object" in expected:
         properties = schema.get("properties", {})
