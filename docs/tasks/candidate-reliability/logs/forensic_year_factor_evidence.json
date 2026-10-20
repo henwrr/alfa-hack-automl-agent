@@ -1,0 +1,20 @@
+{
+  "source_train_features": "/Users/egoraprelsky/Desktop/coding/alfa_hackathon/runs/parallel-public/regression/train_features.csv",
+  "source_test_features": "/Users/egoraprelsky/Desktop/coding/alfa_hackathon/runs/parallel-public/regression/test_features.csv",
+  "feature": "Year_Factor",
+  "train": {
+    "rows": 42646,
+    "minimum": 1,
+    "maximum": 5,
+    "groups": [1, 2, 3, 4, 5]
+  },
+  "test": {
+    "rows": 22449,
+    "minimum": 6,
+    "maximum": 6,
+    "groups": [6]
+  },
+  "all_test_values_strictly_after_train_max": true,
+  "verification": "Read-only pandas usecols=['Year_Factor'] on existing run feature CSVs; no target read and no fit performed.",
+  "interpretation_limit": "This confirms a future-only feature distribution. It does not establish that temporal CV improves held-out score or that the feature shift is causal."
+}
