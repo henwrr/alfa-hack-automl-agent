@@ -572,7 +572,14 @@ def fit_model(model, X, y, *, context, options=None, iteration_override=None, in
             inner_train_rows = int(len(train_indices))
             inner_valid_rows = int(len(valid_indices))
 
-    final_model = clone(model)
+    # The public code interface also accepts plain fit/predict classes. Builders
+    # provide fresh objects per fold; only native early-stop probes require clone.
+    try:
+        final_model = clone(model)
+    except TypeError:
+        if backend is not None:
+            raise
+        final_model = model
     final_model = _maybe_wrap_xgboost_classifier(final_model, backend)
     if backend is not None and selected_iteration is not None:
         _set_iteration_count(final_model, backend, selected_iteration, clear_early_stopping=True)

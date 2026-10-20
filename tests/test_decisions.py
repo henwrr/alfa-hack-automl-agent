@@ -22,7 +22,7 @@ def make_task(path):
 
 
 def config_for(task, directory, *extra):
-    return parse_config([str(task), '--run-dir', str(directory), '--time-budget', '90', '--trial-timeout', '20',
+    return parse_config(["--cv-folds", "1", "--family-trials", "3", str(task), '--run-dir', str(directory), '--time-budget', '90', '--trial-timeout', '20',
                          '--max-trials', '2', '--n-jobs', '1', '--family-trials', '1', '--experiment-mode', 'code', *extra])
 
 

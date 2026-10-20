@@ -450,6 +450,9 @@ def feature_importance(model: Any, context: Any) -> dict:
     else:
         estimator = candidate
         preprocessor = None
+    # Host XGBoost label decoder preserves the original class axis.
+    if type(estimator).__module__ == 'automl_agent.training' and type(estimator).__name__ == '_XGBLabelDecodingClassifier':
+        estimator = vars(estimator).get('_model', vars(estimator).get('estimator'))
     estimator_key = (type(estimator).__module__, type(estimator).__name__)
     try:
         if estimator_key in _KNOWN_TREE_ESTIMATORS:

@@ -1,0 +1,20 @@
+{
+  "phase": "green",
+  "command": [
+    ".venv/bin/python",
+    "-m",
+    "pytest",
+    "tests/test_cv_worker.py",
+    "tests/test_config.py",
+    "tests/test_validation_plan.py",
+    "tests/test_research_cv_agent.py",
+    "tests/test_recipe_agent.py",
+    "tests/test_acceptance.py",
+    "-q"
+  ],
+  "cwd": "/Users/egoraprelsky/Desktop/coding/alfa_hackathon",
+  "started_at_utc": "2026-10-20T08:42:25.262076+00:00",
+  "returncode": 1,
+  "output": "................................F                                        [100%]\n=================================== FAILURES ===================================\n________ test_fake_openai_cli_recovers_from_bad_experiment_and_finishes ________\n\ntmp_path = PosixPath('/private/var/folders/c2/43y9jwz953gddvrb_dkrwyy40000gn/T/pytest-of-egoraprelsky/pytest-220/test_fake_openai_cli_recovers_0')\n\n    def test_fake_openai_cli_recovers_from_bad_experiment_and_finishes(tmp_path: Path) -> None:\n        task_path = _write_synthetic_task(tmp_path / \"synthetic\")\n        run_dir = tmp_path / \"run-artifacts\"\n        fake = _FakeOpenAIServer()\n        server_thread = threading.Thread(target=fake.serve_forever, daemon=True)\n        server_thread.start()\n        host, port = fake.server_address\n        environment = os.environ.copy()\n        environment.update(\n            {\n                \"OPENAI_API_KEY\": \"acceptance-test-key\",\n                \"OPENAI_MODEL\": \"acceptance-fake\",\n                \"OPENAI_BASE_URL\": f\"http://{host}:{port}/v1\",\n                \"AUTOML_PROVIDER\": \"openai\",\n            }\n        )\n    \n        try:\n            completed = subprocess.run(\n                [\n                    sys.executable,\n                    str(SOLUTION),\n                    \"--cv-folds\", \"1\", \"--family-trials\", \"3\",\n                    str(task_path),\n                    \"--experiment-mode\",\n                    \"code\",\n                    \"--run-dir\",\n                    str(run_dir),\n                    \"--time-budget\",\n                    \"90\",\n                    \"--trial-timeout\",\n                    \"15\",\n                    \"--max-trials\",\n                    \"4\",\n                    \"--max-steps\",\n                    \"6\",\n                    \"--max-tokens\",\n                    \"16000\",\n                    \"--response-tokens\",\n                    \"256\",\n                    \"--llm-timeout\",\n                    \"10\",\n                    \"--n-jobs\",\n                    \"1\",\n                    \"--seed\",\n                    \"19\",\n                ],\n                cwd=task_path.parent,\n                env=environment,\n                capture_output=True,\n                text=True,\n                timeout=120,\n                check=False,\n            )\n        finally:\n            fake.shutdown()\n            server_thread.join(timeout=5)\n            fake.server_close()\n    \n        assert completed.returncode == 0, completed.stdout + completed.stderr\n>       assert len(fake.requests_seen) >= 3, \"expected failed run, repair, and finish model calls\"\nE       AssertionError: expected failed run, repair, and finish model calls\nE       assert 2 >= 3\nE        +  where 2 = len([{'max_tokens': 256, 'messages': [{'content': 'You are an autonomous tabular ML researcher. Host owns fixed validation...role': 'tool', 'tool_call_id': 'request_0001_tool_0'}], 'model': 'acceptance-fake', 'parallel_tool_calls': False, ...}])\nE        +    where [{'max_tokens': 256, 'messages': [{'content': 'You are an autonomous tabular ML researcher. Host owns fixed validation...role': 'tool', 'tool_call_id': 'request_0001_tool_0'}], 'model': 'acceptance-fake', 'parallel_tool_calls': False, ...}] = <test_acceptance._FakeOpenAIServer object at 0x1408e69c0>.requests_seen\n\ntests/test_acceptance.py:208: AssertionError\n=========================== short test summary info ============================\nFAILED tests/test_acceptance.py::test_fake_openai_cli_recovers_from_bad_experiment_and_finishes\n1 failed, 32 passed in 21.65s\n",
+  "seconds": 21.866
+}

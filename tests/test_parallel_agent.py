@@ -22,7 +22,7 @@ def task_at(path):
 
 
 def config(task, directory, **updates):
-    cfg = parse_config([*(['--offline'] if updates.get('offline') else []), str(task), '--run-dir', str(directory), '--time-budget', '90', '--trial-timeout', '20',
+    cfg = parse_config(["--cv-folds", "1", "--family-trials", "3", *(['--offline'] if updates.get('offline') else []), str(task), '--run-dir', str(directory), '--time-budget', '90', '--trial-timeout', '20',
                         '--max-trials', '4', '--max-steps', '3', '--n-jobs', '4'])
     cfg.family_trials = 1
     cfg.experiment_mode = "code"
@@ -114,14 +114,14 @@ def test_selection_ties_do_not_depend_on_worker_completion_order():
                                   ['--parallel-trials', '2', '--memory-limit-mb', '16000'] ])
 def test_resource_overcommit_is_rejected(args):
     with pytest.raises(SystemExit):
-        parse_config(['--offline', *args])
+        parse_config(["--cv-folds", "1", "--family-trials", "3", '--offline', *args])
 
 
 def test_two_by_four_is_default_and_final_reserve_has_no_old_ten_minute_cap():
-    cfg = parse_config(['--offline'])
+    cfg = parse_config(["--cv-folds", "1", "--family-trials", "3", '--offline'])
     assert cfg.parallel_trials == 2 and cfg.n_jobs == 4
     assert cfg.reserve_seconds == pytest.approx(1620)
-    assert parse_config(['--offline', '--parallel-trials', '1', '--n-jobs', '8']).n_jobs == 8
+    assert parse_config(["--cv-folds", "1", "--family-trials", "3", '--offline', '--parallel-trials', '1', '--n-jobs', '8']).n_jobs == 8
 
 
 def test_parallel_unknown_outcomes_are_settled_once_without_replay(tmp_path, monkeypatch):

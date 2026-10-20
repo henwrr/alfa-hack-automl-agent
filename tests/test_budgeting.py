@@ -178,3 +178,13 @@ def test_same_durable_best_reconstruction_produces_same_plan() -> None:
     resumed = plan_finalization(total_seconds=3_600, validation_fraction=0.2, train_rows=1_001, best=restored)
 
     assert resumed == first
+
+
+def test_cv_reserve_uses_one_measured_refit_not_all_five_folds():
+    from automl_agent.contracts import ExperimentResult
+    from automl_agent.budgeting import plan_finalization
+    best=ExperimentResult('trial_0001','ok','.','hash','CV',metric=.5,seconds=900,
+                          model_details={'training':{'estimated_refit_seconds':100.}})
+    plan=plan_finalization(total_seconds=3600,validation_fraction=.2,best=best,train_rows=1000)
+    assert plan['estimated_fit_seconds']==150.
+    assert plan['reserve_seconds']==186.

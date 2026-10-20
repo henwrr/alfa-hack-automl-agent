@@ -99,6 +99,22 @@ def _read_probability_artifacts(trial_dir: Path) -> tuple[np.ndarray, list[Any]]
 def score_trial(task: TaskSpec, split: dict, trial_dir: Path) -> dict[str, float]:
     """Compute metrics from host-owned labels and candidate prediction files."""
     trial_dir = Path(trial_dir)
+    if split.get('mode') == 'evaluate_cv':
+        try:
+            worker_result = json.loads((trial_dir/'worker_result.json').read_text())
+            indices = np.load(trial_dir/'oof_indices.npy', allow_pickle=False)
+            plan = json.loads(Path(split['cv_plan']).read_text())
+            fold_ids = np.load(trial_dir/'oof_fold_ids.npy', allow_pickle=False)
+            expected_ids = np.full(len(pd.read_csv(split['train_target'])), -1)
+            for fold in plan['folds']:
+                expected_ids[fold['validation']] = fold['fold']
+            aligned = (worker_result.get('split_fingerprint') == split['split_fingerprint']
+                       and np.array_equal(indices, split['validation_indices'])
+                       and np.array_equal(fold_ids, expected_ids[split['validation_indices']]))
+        except (OSError, ValueError, KeyError) as exc:
+            raise ValueError('OOF alignment artifacts are missing or invalid') from exc
+        if not aligned:
+            raise ValueError('OOF indices, fold IDs or split fingerprint do not match the host plan')
     validation_path = Path(split["validation_target"])
     actual = _read_one_column(validation_path, task.target, "validation_target.csv")
     prediction_path = trial_dir / "valid_predictions.csv"

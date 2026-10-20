@@ -21,18 +21,21 @@ class Config:
     time_budget: float = 10800
     trial_timeout: float = 900
     llm_timeout: float = 180
-    max_trials: int = 6
-    max_steps: int = 14
-    max_tokens: int = 100000
+    max_trials: int | None = None
+    max_steps: int | None = None
+    max_tokens: int = 2000000
     response_tokens: int = 6144
     n_jobs: int = 4
     parallel_trials: int = 2
-    family_trials: int = 3
+    family_trials: int = 4
     experiment_mode: str = "recipe"
     memory_limit_mb: int = 12000
     context_chars: int = 48000
     seed: int = 42
     validation_fraction: float = 0.2
+    cv_folds: int = 5
+    validation_strategy: str = "auto"
+    time_column: str | None = None
     run_dir: Path | None = None
     resume: bool = False
     offline: bool = False
@@ -40,6 +43,14 @@ class Config:
     task_type: str | None = None
     metric: str | None = None
     extra_body: dict | None = None
+
+    @property
+    def trial_limit(self):
+        return self.max_trials if self.max_trials is not None else math.inf
+
+    @property
+    def step_limit(self):
+        return self.max_steps if self.max_steps is not None else math.inf
 
     @property
     def reserve_seconds(self) -> float:
@@ -59,18 +70,21 @@ def parse_config(argv=None) -> Config:
     parser.add_argument("--time-budget", type=float, default=10800, help="Total wall time in seconds, at most 10800")
     parser.add_argument("--trial-timeout", type=float, default=900)
     parser.add_argument("--llm-timeout", type=float, default=180)
-    parser.add_argument("--max-trials", type=int, default=6, help="Includes the baseline and failed trials")
-    parser.add_argument("--max-steps", type=int, default=14)
-    parser.add_argument("--max-tokens", type=int, default=100000, help="Total input + output token budget")
+    parser.add_argument("--max-trials", type=int, default=None, help="Optional cap including baseline and failed trials; default uses the time budget")
+    parser.add_argument("--max-steps", type=int, default=None)
+    parser.add_argument("--max-tokens", type=int, default=2000000, help="Total input + output token budget")
     parser.add_argument("--response-tokens", type=int, default=6144)
     parser.add_argument("--n-jobs", type=int, default=4, help="Threads per trial; total parallel allocation must be <=8")
     parser.add_argument("--parallel-trials", type=int, choices=[1, 2], default=2)
-    parser.add_argument("--family-trials", type=int, choices=[1, 2, 3], default=3, help="Maximum warm-up families; 1 keeps only the legacy baseline")
+    parser.add_argument("--family-trials", type=int, choices=[1, 2, 3, 4, 5], default=4, help="Maximum warm-up families; 1 keeps only the legacy baseline")
     parser.add_argument("--experiment-mode", choices=["recipe", "code"], default="recipe", help="Validated parameter recipes by default; code enables free-form Python proposals")
     parser.add_argument("--memory-limit-mb", type=int, default=12000)
     parser.add_argument("--context-chars", type=int, default=48000)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--validation-fraction", type=float, default=0.2)
+    parser.add_argument("--cv-folds", type=int, choices=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10], default=5, help="OOF folds; 1 enables legacy holdout")
+    parser.add_argument("--validation-strategy", choices=["auto", "iid", "temporal"], default="auto")
+    parser.add_argument("--time-column")
     parser.add_argument("--run-dir", type=Path)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--offline", action="store_true", help="Explicit deterministic baseline smoke, without LLM")
@@ -96,7 +110,7 @@ def parse_config(argv=None) -> Config:
     if args.time_budget > 10800:
         parser.error("--time-budget must be at most 10800 seconds")
     for name in ("max_trials", "max_steps", "max_tokens", "response_tokens", "memory_limit_mb", "context_chars"):
-        if getattr(args, name) <= 0:
+        if getattr(args, name) is not None and getattr(args, name) <= 0:
             parser.error(f"--{name.replace('_', '-')} must be positive")
     if not 1 <= args.n_jobs <= 8:
         parser.error("--n-jobs must be between 1 and 8")
@@ -117,4 +131,13 @@ def parse_config(argv=None) -> Config:
     args.task_path = args.task_path.expanduser().resolve()
     if args.run_dir is not None:
         args.run_dir = args.run_dir.expanduser().resolve()
+    if args.resume:
+        saved_path = args.run_dir / "config.json"
+        if saved_path.exists():
+            saved = json.loads(saved_path.read_text(encoding="utf-8"))
+            supplied = list(argv) if argv is not None else __import__('sys').argv[1:]
+            for name, legacy in (("cv_folds", 1), ("validation_strategy", "iid"), ("time_column", None)):
+                flag = "--" + name.replace("_", "-")
+                if not any(v == flag or v.startswith(flag + "=") for v in supplied):
+                    setattr(args, name, saved.get(name, legacy))
     return Config(**vars(args), provider=provider, base_url=base_url, model=model, api_key=api_key, extra_body=extra_body)

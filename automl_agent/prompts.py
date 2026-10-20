@@ -25,21 +25,55 @@ In decision give concise public Russian explanations: model_family, observations
 
 
 RECIPE_SYSTEM_PROMPT = """You are a tabular ML researcher. Host owns the fixed validation split, independent metric and best-model selection. Never invent scores or claim improvement before measurement. Test targets are placeholders; no validation labels are available to you.
-Use run_model_experiments with experiments:[{hypothesis,base_trial_id,parameters,preprocessing,decision},...] to test edits to successful measured recipes. Send two independent focused hypotheses when runtime.parallel_trials=2 and two trial slots remain. The host preserves tested preprocessing, compiles complete code and trains candidates with context.n_jobs CPU threads. Use model_catalog for supported parameters/ranges. Do not send Python code in recipe mode. Each experiment must actually change a parameter or preprocessing option. Duplicate configurations are rejected even if the hypothesis text changes.
-Select the base by its measured metric, runtime and actual model_details.parameters. Omitted parameters inherit the base, including CatBoost's measured automatic learning_rate. Change one factor at a time or explain an interaction. Do not silently replace a strong native learning rate with a familiar small constant. More iterations and a much lower rate can underfit; one worse validation score alone does not prove overfitting. No early stopping is applied because these recipes have no eval_set.
+Use run_model_experiments with experiments:[{hypothesis,base_trial_id,parameters,preprocessing,fit_options,decision},...] to test edits to successful measured recipes. Send two independent focused hypotheses when runtime.parallel_trials=2 and two trial slots remain. The host preserves tested preprocessing, compiles complete code and trains candidates with context.n_jobs CPU threads. Use model_catalog for supported parameters/ranges. Do not send Python code in recipe mode. Each experiment must actually change a parameter or preprocessing option. Duplicate configurations are rejected even if the hypothesis text changes.
+Select the base by its measured metric, runtime and actual model_details.parameters. Omitted parameters inherit the base, including CatBoost's measured automatic learning_rate. Change one factor at a time or explain an interaction. Do not silently replace a strong native learning rate with a familiar small constant. More iterations and a much lower rate can underfit; one worse validation score alone does not prove overfitting. For boosting use fit_options.early_stopping_rounds: the host creates a separate train-only inner eval_set and refits each outer train fold using the selected number of trees. OOF labels never enter fitting or early stopping. Constructor sample_weight is invalid; fit_options.sample_weight supports balanced or sqrt_balanced row weights. Never combine row and constructor class weights.
 For imbalanced classification and macro_f1, prioritize an untested comparison of CatBoost auto_class_weights="Balanced" and "SqrtBalanced" against the same measured unweighted base, retaining learning_rate/iterations. For sklearn use class_weight="balanced". These are real training weights. class_weights="Balanced" and constructor sample_weight are invalid; y_train is not in context. Do not retry the same failed recipe under a new name.
 For regression with missing numeric data, consider one controlled add_missing_indicators=true study on ExtraTrees/Linear. CatBoost handles missing values natively. For bounded trees compare capacity (max_leaf_nodes/min_samples_leaf) with the current winning values before making trees even smaller. Respect measured process times and remaining time; do not assume linear scaling guarantees completion. Try fewer substantial, independent changes rather than many contradictory parameter changes.
-In decision give concise PUBLIC Russian explanations: model_family, observations, rationale, alternatives, expected_effect, risks, previous_result_assessment. Distinguish observed facts from expectations; do not supply private internal reasoning. hypothesis and finish reason must be Russian. After successful measured experiments call finish_research(reason) when further hypotheses lack evidence. Return native tool calls or exact JSON {"tool":"run_model_experiments","arguments":{"experiments":[...]}}.
+In decision give concise PUBLIC Russian explanations: model_family, observations, rationale, alternatives, expected_effect, risks, previous_result_assessment. Distinguish observed facts from expectations; do not supply private internal reasoning. hypothesis and finish reason must be Russian. Use available research time for evidence-driven experiments rather than finishing after the first successful edit. Inspect validation_plan, dataset_diagnostics, per-class confusion/errors, regression segments and feature importance; explain which observed error motivates each edit. Feature importance is associative, not causal. Stop at the reserved deadline or after measured convergence. With temporal CV, treat earlier-period scores as transfer estimates, not iid performance. Host OOF blending and Macro F1 calibration are evaluated separately after research. Return native tool calls or exact JSON {"tool":"run_model_experiments","arguments":{"experiments":[...]}}.
 """
 
 
 def _profile_facts(profile):
-    keys = ("task_type", "metric", "train_shape", "test_shape", "feature_count", "categorical_columns", "target", "available_packages")
+    keys = ("task_type", "metric", "train_shape", "test_shape", "feature_count", "categorical_columns", "target", "available_packages", "validation_plan")
     result = {key: profile[key] for key in keys if key in profile}
+    drift = profile.get('dataset_diagnostics', {})
+    if drift:
+        result['dataset_diagnostics'] = {k:drift[k] for k in ('temporal_candidates','adversarial_cv') if k in drift}
+        result['dataset_diagnostics']['feature_shift'] = dict(list(drift.get('features', {}).items())[:8])
     features = profile.get("features", {})
     important = sorted(features, key=lambda name: (features[name].get("missing_fraction", 0), features[name].get("unique", 0)), reverse=True)
     result["feature_summary"] = [{"name": name, **{key: features[name][key] for key in ("dtype", "missing_fraction", "unique", "non_finite", "numeric") if key in features[name]}} for name in important[:12]]
     return result
+
+def brief_details(details):
+    result = {k:v for k,v in details.items() if k not in {'training','feature_importance','pipeline_steps'}}
+    training = details.get('training', {})
+    if training:
+        result['training'] = {k:v for k,v in training.items() if k not in {'folds','trained_parameters'}}
+        if 'folds' in training:
+            result['training']['fold_best_iterations'] = [row.get('best_iteration') for row in training['folds']]
+    return result
+
+
+def brief_diagnostics(diagnostics):
+    result = dict(diagnostics)
+    if 'feature_importance' in result:
+        result['feature_importance'] = dict(result['feature_importance'])
+        result['feature_importance']['items'] = result['feature_importance'].get('items', [])[:12]
+    if 'segments' in result:
+        result['segments'] = result['segments'][:10]
+    return result
+
+
+def prompt_tool_result(value):
+    if isinstance(value, list):
+        return [prompt_tool_result(item) for item in value]
+    if isinstance(value, dict):
+        return {k:brief_details(v) if k == 'model_details' and isinstance(v, dict)
+                else brief_diagnostics(v) if k == 'diagnostics' and isinstance(v, dict)
+                else prompt_tool_result(v) for k,v in value.items()}
+    return value
+
 
 def _read_code(result, limit=18000):
     if result is None:
@@ -52,6 +86,10 @@ def build_messages(task, profile, results, best, runtime_context, feedback="", c
     ledger = [{"trial_id": r.trial_id, "status": r.status, "hypothesis": r.hypothesis[:1500], "metric": r.metric,
                "seconds": round(r.seconds, 2), "model_details": r.model_details, "recipe": getattr(r, "recipe", None),
                "parent_trial_id": getattr(r, "parent_trial_id", None), "diagnostics": getattr(r, "diagnostics", {}), "error": (r.error or "")[-2500:]} for r in results]
+    for item in ledger:
+        item['model_details'] = brief_details(item['model_details'])
+        item['diagnostics'] = brief_diagnostics(item['diagnostics'])
+    ledger = ledger[-8:]
     failed = results[-1] if results and results[-1].status != "ok" else None
     description = task.description
     if len(description) > 9000:
@@ -61,6 +99,13 @@ def build_messages(task, profile, results, best, runtime_context, feedback="", c
                "research_strategy": profile.get("research_strategy", {}), "experiments": ledger, "best_code": _read_code(best),
                "last_failed_code": _read_code(failed, 10000), "runtime": runtime_context,
                "previous_tool_feedback": feedback[-5000:], "family_comparison": profile.get("family_comparison", {})}
+    content['best_experiment'] = None
+    if best and not any(item['trial_id'] == best.trial_id for item in ledger):
+        content['best_experiment'] = {'trial_id':best.trial_id,'metric':best.metric,'recipe':best.recipe,
+                                      'model_details':brief_details(best.model_details),'diagnostics':brief_diagnostics(best.diagnostics)}
+    content['family_comparison'] = {'trials':[{k:row.get(k) for k in ('family','trial_id','status','metric','seconds')}
+                                          | {'model_details':brief_details(row.get('model_details',{}))} for row in profile.get('family_comparison',{}).get('trials',[])],
+                                     'selected_trial':profile.get('family_comparison',{}).get('selected_trial')}
     limit = max(5000, context_chars // 2) if compact else max(5000, context_chars)
     recipe_mode = runtime_context.get("experiment_mode") == "recipe"
     if recipe_mode:
@@ -75,7 +120,7 @@ def build_messages(task, profile, results, best, runtime_context, feedback="", c
         # failed experiment remains actionable under a tight token budget.
         content["data_profile"] = _profile_facts(profile)
         comparison = profile.get("family_comparison", {})
-        content["family_comparison"] = {"trials": [{k: row.get(k) for k in ("family", "trial_id", "status", "metric", "seconds", "model_details", "recipe")} for row in comparison.get("trials", [])], "selected_trial": comparison.get("selected_trial")}
+        content["family_comparison"] = {"trials": [{k: row.get(k) for k in ("family", "trial_id", "status", "metric", "seconds", "recipe")} | {"model_details":brief_details(row.get("model_details",{}))} for row in comparison.get("trials", [])], "selected_trial": comparison.get("selected_trial")}
         strategy = profile.get("research_strategy", {})
         content["research_strategy"] = {
             "facts": strategy.get("facts", {}),
@@ -91,7 +136,10 @@ def build_messages(task, profile, results, best, runtime_context, feedback="", c
         for row in content.get("family_comparison", {}).get("trials", []):
             if "model_details" in row:
                 row["model_details"] = measured_details(row["model_details"])
-        content["previous_tool_feedback"] = feedback[-800:]
+        content["previous_tool_feedback"] = feedback[-800:] if recipe_mode else ""
+        if not recipe_mode:
+            for row in content["family_comparison"]["trials"]:
+                row.pop("model_details", None)  # measured details already occur in the experiment ledger
     # Preserve model code and the exact ledger; trim auxiliary profiling first.
     encoded = json.dumps(content, ensure_ascii=False, allow_nan=False, default=str)
     if len(encoded) > limit:

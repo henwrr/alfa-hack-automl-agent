@@ -63,7 +63,7 @@ def plan_research(task, profile, config):
             "parallel_trials": getattr(config, "parallel_trials", 2),
             "budget": {"total_seconds": config.time_budget, "finalization_reserve_seconds": config.reserve_seconds,
                        "trial_timeout_seconds": config.trial_timeout, "threads_per_trial": config.n_jobs},
-            "validation_caveat": "Проверить требования task.md к времени/группам: текущий host использует фиксированный случайный holdout; автоматически временные и групповые split не строятся."}
+            "validation_caveat": "Проверить требования task.md к времени/группам: по умолчанию host использует CV и выбирает forward periods при подтверждённом временном сдвиге; изучите validation_plan."}
 
 
 def baseline_decision(strategy):

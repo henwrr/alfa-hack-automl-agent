@@ -93,6 +93,10 @@ def plan_finalization(
     if measured_seconds is None:
         return _initial_plan(total)
 
+    training = getattr(best, 'model_details', {}).get('training', {})
+    cv_estimate = training.get('estimated_refit_seconds')
+    if isinstance(cv_estimate, (int, float)) and not isinstance(cv_estimate, bool) and math.isfinite(cv_estimate) and cv_estimate > 0:
+        measured_seconds, row_scale = float(cv_estimate), 1.0
     estimated_fit = measured_seconds * row_scale * _SAFETY_FACTOR
     # Reserve time for writing artifacts and the final result. Scale with the
     # run while retaining a small absolute minimum for short runs.

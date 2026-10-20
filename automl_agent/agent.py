@@ -74,6 +74,11 @@ class ResearchRun:
             raise ValueError("No saved state in --run-dir")
         signature = {"data": self.task.data_fingerprint, "seed": config.seed, "validation_fraction": config.validation_fraction,
                      "target": self.task.target, "metric": self.task.metric, "task_type": self.task.task_type}
+        self.settings_version = self.state.get("settings_version", 1) if self.state else 2
+        if self.settings_version == 2:
+            signature["validation_settings"] = {"folds":config.cv_folds,"strategy":config.validation_strategy,"time_column":config.time_column}
+        elif config.cv_folds != 1:
+            raise ValueError("Legacy run uses holdout; resume with --cv-folds 1 or start a new run")
         self.signature = hashlib.sha256(json.dumps(signature, sort_keys=True).encode()).hexdigest()
         if self.state and self.state.get("settings_fingerprint") != self.signature:
             raise ValueError("Input data or split settings changed (fingerprint mismatch); start a new run")
@@ -97,7 +102,7 @@ class ResearchRun:
         self.tokens_used = int(self.state.get("total_tokens", 0))
         self.steps = int(self.state.get("llm_calls", 0))
         self.feedback = ""
-        self.stop_reason = "offline" if config.offline else "max_trials"
+        self.stop_reason = "offline" if config.offline else "time_budget"
         self.finish_requested = False
         self.recent_steps = []
         self.split = None
@@ -178,11 +183,12 @@ class ResearchRun:
         from .journal import atomic_write_json
 
         best = select_best(self.results, self.task.maximize)
-        state = {"version": 1, "data_fingerprint": self.task.data_fingerprint, "settings_fingerprint": self.signature,
+        state = {"version": 1, "settings_version": self.settings_version, "data_fingerprint": self.task.data_fingerprint, "settings_fingerprint": self.signature,
                  "elapsed_seconds": self.budget.elapsed(), "checkpoint_epoch": time.time(), "active": active,
                  "total_tokens": self.tokens_used, "llm_calls": self.steps, "trials": [r.to_dict() for r in self.results],
                  "selected_trial": best.trial_id if best else None, "stop_reason": self.stop_reason,
-                 "active_trials": list(self.active_trials), "reserve_plan": self.reserve_plan}
+                 "active_trials": list(self.active_trials), "reserve_plan": self.reserve_plan,
+                 "validation_settings": {"folds":self.config.cv_folds,"strategy":self.config.validation_strategy,"time_column":self.config.time_column}}
         state = self.journal.redact(state)
         atomic_write_json(self.state_path, state)
         atomic_write_json(self.directory / "experiments.json", {"trials": state["trials"], "selected_trial": state["selected_trial"]})
@@ -254,7 +260,8 @@ class ResearchRun:
                     result = registry.execute(function["name"], function["arguments"], allow_hidden=allow_legacy)
                 self.journal.append("tool_result", call_id=call["id"], name=function["name"], result=result)
                 self.tool_results[call["id"]] = result
-            self.feedback = json.dumps(result, ensure_ascii=False, default=str)
+            from .prompts import prompt_tool_result
+            self.feedback = json.dumps(prompt_tool_result(result), ensure_ascii=False, default=str)
             step_messages.append({"role": "tool", "tool_call_id": call["id"], "name": function["name"], "content": self.feedback})
             self.checkpoint()
         if history_safe:
@@ -281,7 +288,7 @@ class ResearchRun:
     def _prepare_trial(self, hypothesis, code, is_baseline=False, decision=None, origin='llm', recipe=None, recipe_hash=None, parent_trial_id=None):
         from .journal import atomic_write_json
         from .tools import validate_candidate_code
-        if len(self.results) + len(self.active_trials) >= self.config.max_trials:
+        if len(self.results) + len(self.active_trials) >= self.config.trial_limit:
             raise ValueError('Experiment budget exhausted')
         remaining = self.budget.research_remaining()
         if remaining <= 0:
@@ -313,7 +320,11 @@ class ResearchRun:
             return result, None
         manifest = {'mode': 'evaluate', 'context': self.task.model_context(self.config.n_jobs),
                     'inputs': {key: self.split[key] for key in ('train_features', 'train_target', 'validation_features', 'test_features')},
-                    'code_path': str(directory / 'code.py'), 'artifact_dir': str(directory), 'save_model': True}
+                    'code_path': str(directory / 'code.py'), 'artifact_dir': str(directory), 'save_model': True,
+                    'fit_options': (recipe or {}).get('fit_options', {})}
+        if self.split.get('mode') == 'evaluate_cv':
+            manifest.update(mode='evaluate_cv', cv_plan=self.split['cv_plan'], preflight=recipe is None)
+            manifest['inputs'].pop('validation_features')
         atomic_write_json(directory / 'manifest.json', manifest)
         return result, {'argv': [sys.executable, '-m', 'automl_agent.worker', '--manifest', str(directory / 'manifest.json')],
                         'cwd': directory, 'timeout': min(self.config.trial_timeout, remaining), 'n_jobs': self.config.n_jobs,
@@ -336,6 +347,9 @@ class ResearchRun:
                     from .diagnostics import validation_diagnostics
                     try:
                         result.diagnostics = validation_diagnostics(self.task, self.split, directory)
+                        from .validation import oof_metric_summary
+                        result.diagnostics['validation'] = oof_metric_summary(self.task, self.split, directory)
+                        result.diagnostics['feature_importance'] = result.model_details.get('feature_importance', {'status':'unavailable'})
                     except Exception as exc:
                         result.diagnostics = {'unavailable': type(exc).__name__}
                     if not math.isfinite(result.metric):
@@ -408,7 +422,7 @@ class ResearchRun:
         recipe = normalize_recipe(result.recipe, self.task.task_type)
         if recipe['family'] == 'CatBoost':
             actual = result.model_details.get('parameters', {})
-            for key in ('iterations', 'learning_rate', 'depth', 'l2_leaf_reg', 'border_count', 'auto_class_weights'):
+            for key in ('learning_rate', 'depth', 'l2_leaf_reg', 'border_count', 'auto_class_weights'):
                 if key in actual and (key != 'auto_class_weights' or self.task.task_type == 'classification'):
                     recipe['parameters'][key] = actual[key]
         return normalize_recipe(recipe, self.task.task_type)
@@ -435,6 +449,10 @@ class ResearchRun:
                     raise ValueError('parameters and preprocessing must be JSON objects')
                 recipe['parameters'].update(parameters)
                 recipe['preprocessing'].update(preprocessing)
+                if 'fit_options' in experiment:
+                    if not isinstance(experiment['fit_options'], dict):
+                        raise ValueError('fit_options must be a JSON object')
+                    recipe.setdefault('fit_options', {}).update(experiment['fit_options'])
                 recipe = normalize_recipe(recipe, self.task.task_type)
                 if recipe['preprocessing'].get('add_missing_indicators') and not any(c not in self.task.categorical_columns for c in self.task.feature_columns):
                     raise ValueError('Missing indicators require numeric columns; this task has only categorical features')
@@ -470,9 +488,19 @@ class ResearchRun:
         for proposal in candidates:
             proposal['recipe'] = default_recipe(proposal['family'], self.task.task_type)
             proposal['recipe_hash'] = recipe_fingerprint(proposal['recipe'], self.task.task_type)
+        if self.config.cv_folds > 1:
+            from .recipes import initial_research_recipes, recipe_code
+            candidates = []
+            for recipe in initial_research_recipes(self.task.task_type, self.profile['available_packages'])[:self.config.family_trials]:
+                family = recipe['family']
+                candidates.append({'family':family, 'recipe':recipe, 'recipe_hash':recipe_fingerprint(recipe, self.task.task_type),
+                    'code':recipe_code(recipe, self.task.task_type, self.config.n_jobs),
+                    'hypothesis':f'Сравнить {family} на общем OOF; остановка бустинга по внутренней validation.',
+                    'decision':{'model_family':family, 'rationale':'Стартовое сравнение разных семейств на воспроизводимой CV.',
+                                'expected_effect':'Качество неизвестно до проверки.', 'risks':['Адаптивный выбор по OOF может переоценивать качество.']}})
         # Preserve two LLM attempt slots. If a complete requested comparison
         # cannot fit, start from the legacy baseline and say why in the log.
-        limited = not self.config.offline and self.config.max_trials < len(candidates) + 2
+        limited = not self.config.offline and self.config.trial_limit < len(candidates) + 2
         if self.config.family_trials == 1 or limited:
             if self.config.experiment_mode == 'recipe':
                 candidates = candidates[:1]
@@ -481,7 +509,7 @@ class ResearchRun:
                                'code': baseline_code(self.task, n_jobs=self.config.n_jobs), 'decision': baseline_decision(strategy)}]
         attempted = {r.decision.get('model_family') for r in self.results if r.is_baseline}
         proposed = [p for p in candidates if p['family'] not in attempted]
-        proposed = proposed[:max(0, self.config.max_trials - len(self.results))]
+        proposed = proposed[:None if self.config.max_trials is None else max(0, self.config.max_trials - len(self.results))]
         self.journal.append('family_comparison_started', families=[p['family'] for p in candidates],
                             planned=len(proposed), limited_by_trial_budget=limited, split_fingerprint=self.split['split_fingerprint'])
         if proposed and self.budget.research_remaining() > 0:
@@ -517,6 +545,13 @@ class ResearchRun:
     def _finish(self, reason):
         if not any(r.status == "ok" and not r.is_baseline for r in self.results):
             raise ValueError("Run at least one successful generated experiment before finishing")
+        if self.config.max_trials is None and self.config.max_steps is None:
+            generated = [r for r in self.results if r.status == 'ok' and not r.is_baseline]
+            best = select_best(self.results, self.task.maximize)
+            recent = generated[-8:]
+            converged = len(recent) == 8 and best not in recent
+            if not converged and self.budget.research_remaining() > max(self.config.trial_timeout, 2*max((r.seconds for r in generated[-2:]), default=0)):
+                raise ValueError('Time-first research: continue evidence-driven experiments while research time remains. Early convergence requires eight successful non-improving candidates; finalization reserve is enforced by host.')
         self.finish_requested = True
         self.stop_reason = "model_finished"
         self.journal.append("research_finished", source="llm", reason=reason)
@@ -548,6 +583,7 @@ class ResearchRun:
             "parameters": {"type": "object", "maxProperties": 16,
                            "description": "Only changed estimator parameters from model_catalog; omitted parameters inherit measured base defaults."},
             "preprocessing": {"type": "object", "properties": {"add_missing_indicators": {"type": "boolean"}}, "additionalProperties": False},
+            "fit_options": {"type": "object", "description": "Changed host fit options: early_stopping_rounds, inner_validation_fraction, sample_weight."},
             "decision": DECISION_SCHEMA}, "required": ["hypothesis", "base_trial_id"], "additionalProperties": False}
         registry.register("run_model_experiments", "Test 1-2 independent parameter/preprocessing edits to measured model recipes; host preserves validated pipeline and inherited defaults.",
                           {"type": "object", "properties": {"experiments": {"type": "array", "minItems": 1,
@@ -560,7 +596,7 @@ class ResearchRun:
             self.journal.append("llm_response_recovered", request_id=request_id)
             self._dispatch_response(request_id, response, registry, allow_legacy=True)
         compact = False
-        while len(self.results) < self.config.max_trials and self.steps < self.config.max_steps and not self.finish_requested:
+        while len(self.results) < self.config.trial_limit and self.steps < self.config.step_limit and not self.finish_requested:
             if self.tokens_used >= self.config.max_tokens:
                 self.stop_reason = "token_budget"
                 break
@@ -572,7 +608,7 @@ class ResearchRun:
             best = select_best(self.results, self.task.maximize)
             messages = build_messages(self.task, self.profile, self.results, best,
                                       {"n_jobs": self.config.n_jobs, "remaining_seconds": round(self.budget.research_remaining(), 2),
-                                       "trial_timeout": self.config.trial_timeout, "remaining_trials": self.config.max_trials - len(self.results),
+                                       "trial_timeout": self.config.trial_timeout, "remaining_trials": None if self.config.max_trials is None else self.config.max_trials - len(self.results),
                                        "parallel_trials": 1 if compact and mode == "code" else self.config.parallel_trials, "reserve_plan": self.reserve_plan, "experiment_mode": mode},
                                       feedback=self.feedback, context_chars=self.config.context_chars, compact=compact)
             # Keep complete recent assistant/tool groups. Older attempts remain
@@ -612,9 +648,9 @@ class ResearchRun:
             self.tokens_used += charged
             self.journal.append("llm_response", request_id=request_id, response=response.to_dict(), charged_tokens=charged)
             self._dispatch_response(request_id, response, registry)
-        if self.steps >= self.config.max_steps and not self.finish_requested:
+        if self.steps >= self.config.step_limit and not self.finish_requested:
             self.stop_reason = "max_steps"
-        if len(self.results) >= self.config.max_trials:
+        if len(self.results) >= self.config.trial_limit:
             self.stop_reason = "max_trials"
         self.journal.append("research_stopped", reason=self.stop_reason, total_tokens=self.tokens_used, elapsed_seconds=round(self.budget.elapsed(), 3))
 
@@ -632,7 +668,9 @@ class ResearchRun:
         (directory / "code.py").write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
         manifest = {"mode": "finalize", "context": self.task.model_context(self.config.n_jobs), "inputs": {
             "train_features": self.split["full_train_features"], "train_target": self.split["full_train_target"], "test_features": self.split["test_features"]},
-            "code_path": str(directory / "code.py"), "artifact_dir": str(directory), "save_model": True}
+            "code_path": str(directory / "code.py"), "artifact_dir": str(directory), "save_model": True,
+            "fit_options": (best.recipe or {}).get("fit_options", {}),
+            "iteration_override": best.model_details.get("training", {}).get("final_iterations")}
         atomic_write_json(directory / "manifest.json", manifest)
         self.journal.append("final_fit_started", trial_id=best.trial_id, artifact_dir=str(directory), reserve_plan=self.reserve_plan, timeout_seconds=max(0.1, self.budget.remaining() - write_margin))
         self.checkpoint()
@@ -700,11 +738,26 @@ class ResearchRun:
                                                    "target": self.task.target, "test_rows": self.profile["test_shape"][0]})
         self.journal.append("research_strategy", strategy=strategy)
         atomic_write_json(self.directory / "profile.json", self.profile)
-        self.split = prepare_split(self.task, self.directory)
+        if self.config.cv_folds > 1:
+            from .data_diagnostics import dataset_diagnostics
+            from .validation import prepare_cv_split
+            cached = self.directory / "dataset_diagnostics.json"
+            drift = _read_json(cached)
+            if drift is None:
+                drift = dataset_diagnostics(self.task, n_jobs=self.config.n_jobs)
+                atomic_write_json(cached, drift)
+            self.profile["dataset_diagnostics"] = drift
+            self.journal.append("dataset_diagnosed", diagnostics=drift)
+            self.split = prepare_cv_split(self.task, self.directory, folds=self.config.cv_folds,
+                        strategy=self.config.validation_strategy, time_column=self.config.time_column, diagnostics=drift)
+            self.profile["validation_plan"] = {k:self.split[k] for k in ('strategy','fold_count','coverage','time_column','warnings')}
+        else:
+            self.split = prepare_split(self.task, self.directory)
+        atomic_write_json(self.directory / "profile.json", self.profile)
         atomic_write_json(self.directory / "split_manifest.json", self.split)
         self.journal.append("validation_planned", summary={"seed": self.task.seed, "fraction": self.task.validation_fraction,
                             "manifest_path": str(self.directory / "split_manifest.json"), "split_fingerprint": self.split["split_fingerprint"],
-                            "policy": "Фиксированный случайный holdout; labels доступны только host-оценщику. Один split для всех опытов."})
+                            "policy": self.split.get("strategy", "legacy_holdout"), "fold_count": self.split.get("fold_count", 1), "coverage": self.split.get("coverage"), "warnings": self.split.get("warnings", [])})
         self._emergency_submission()
         if self.config.resume:
             self._restore_best_submission()
@@ -746,7 +799,7 @@ class ResearchRun:
         for result in self.results:
             rows += ["", f"## {result.trial_id}: {result.hypothesis}", f"Decision: {Path(result.artifact_dir) / 'decision.json'}",
                      f"Actual estimator: {' → '.join(result.model_details.get('estimator_chain', [])) or 'not recorded'}"]
-        rows += ["", "The validation metric belongs to the fixed holdout experiment. The final refit uses all training rows.",
+        rows += ["", "Validation uses the recorded shared split/CV plan. Adaptive model selection can overestimate generalization. The final refit uses all training rows.",
                  "Generated code runs in a supervised subprocess. Use the deployment container for OS-level filesystem/network isolation."]
         (self.directory / "report.md").write_text(self.journal.redact("\n".join(rows) + "\n"), encoding="utf-8")
         self.journal.append("run_completed", report=report)

@@ -35,7 +35,7 @@ def make_task(path):
 def test_offline_run_and_resume_preserve_valid_result(tmp_path):
     task = make_task(tmp_path / "dataset")
     run_dir = tmp_path / "run"
-    args = [str(task), "--offline", "--run-dir", str(run_dir), "--time-budget", "90", "--trial-timeout", "30", "--n-jobs", "1"]
+    args = ["--cv-folds", "1", "--family-trials", "3", str(task), "--offline", "--run-dir", str(run_dir), "--time-budget", "90", "--trial-timeout", "30", "--n-jobs", "1"]
     report = run(parse_config(args))
     assert report["status"] == "offline"
     assert report["llm_calls"] == 0
@@ -44,14 +44,14 @@ def test_offline_run_and_resume_preserve_valid_result(tmp_path):
     assert list(output.columns) == ["row", "outcome"]
     assert list(output["row"]) == list(range(100, 110))
     assert np.isfinite(output["outcome"]).all()
-    resumed = run(parse_config([*args, "--resume"]))
+    resumed = run(parse_config(["--cv-folds", "1", "--family-trials", "3", *args, "--resume"]))
     assert resumed["selected_trial"] == report["selected_trial"]
     assert len(resumed["trials"]) == len(report["trials"])
     frame = pd.read_csv(task.parent / "train.csv")
     frame.loc[0, "outcome"] += 10
     frame.to_csv(task.parent / "train.csv", index=False)
     with pytest.raises(ValueError, match="fingerprint|changed|измен"):
-        run(parse_config([*args, "--resume"]))
+        run(parse_config(["--cv-folds", "1", "--family-trials", "3", *args, "--resume"]))
 
 
 def test_concurrent_resume_cannot_settle_another_process_pending_call(tmp_path):
@@ -59,7 +59,7 @@ def test_concurrent_resume_cannot_settle_another_process_pending_call(tmp_path):
 
     task = make_task(tmp_path / "dataset")
     directory = tmp_path / "run"
-    args = [str(task), "--offline", "--run-dir", str(directory), "--time-budget", "90", "--n-jobs", "1"]
+    args = ["--cv-folds", "1", "--family-trials", "3", str(task), "--offline", "--run-dir", str(directory), "--time-budget", "90", "--n-jobs", "1"]
     run(parse_config(args))
     state = json.loads((directory / "state.json").read_text())
     state["active"] = True
@@ -69,7 +69,7 @@ def test_concurrent_resume_cannot_settle_another_process_pending_call(tmp_path):
     before = (directory / "events.jsonl").read_bytes()
     with _run_lock(directory / "run.lock"):
         with pytest.raises(ValueError, match="Another process"):
-            run(parse_config([*args, "--resume"]))
+            run(parse_config(["--cv-folds", "1", "--family-trials", "3", *args, "--resume"]))
     assert (directory / "events.jsonl").read_bytes() == before
 
 
@@ -94,7 +94,7 @@ def build_model(context):
     monkeypatch.setattr(OpenAICompatibleProvider, "complete", complete)
     monkeypatch.setenv("OPENAI_MODEL", "fake")
     monkeypatch.setenv("AUTOML_PROVIDER", "openai")
-    config = parse_config([str(task), "--experiment-mode", "code", "--run-dir", str(tmp_path / "run"), "--time-budget", "30", "--trial-timeout", "0.75", "--max-trials", "2", "--n-jobs", "1"])
+    config = parse_config(["--cv-folds", "1", "--family-trials", "3", str(task), "--experiment-mode", "code", "--run-dir", str(tmp_path / "run"), "--time-budget", "30", "--trial-timeout", "0.75", "--max-trials", "2", "--n-jobs", "1"])
     report = run(config)
     assert report["trials"][-1]["status"] == "timeout"
     assert report["elapsed_seconds"] < 15
@@ -110,8 +110,8 @@ def test_resume_uses_durable_response_and_usage_without_another_api_call(tmp_pat
 
     task = make_task(tmp_path / "dataset")
     directory = tmp_path / "run"
-    args = [str(task), "--run-dir", str(directory), "--time-budget", "90", "--max-trials", "2", "--n-jobs", "1"]
-    run(parse_config([*args, "--offline", "--family-trials", "1"]))
+    args = ["--cv-folds", "1", "--family-trials", "3", str(task), "--run-dir", str(directory), "--time-budget", "90", "--max-trials", "2", "--n-jobs", "1"]
+    run(parse_config(["--cv-folds", "1", "--family-trials", "3", *args, "--offline", "--family-trials", "1"]))
     state = json.loads((directory / "state.json").read_text())
     state.update(active=True, total_tokens=0, llm_calls=0, checkpoint_epoch=time.time())
     atomic_write_json(directory / "state.json", state)
@@ -128,7 +128,7 @@ def test_resume_uses_durable_response_and_usage_without_another_api_call(tmp_pat
         calls.append(True)
         raise AssertionError("the response was already paid for and persisted")
     monkeypatch.setattr(OpenAICompatibleProvider, "complete", forbidden_call)
-    report = run(parse_config([*args, "--resume"]))
+    report = run(parse_config(["--cv-folds", "1", "--family-trials", "3", *args, "--resume"]))
     assert not calls
     assert report["total_tokens"] >= 42
     assert report["llm_calls"] == 1
@@ -142,7 +142,7 @@ def test_resume_restores_best_predictions_when_refit_budget_is_exhausted(tmp_pat
 
     task = make_task(tmp_path / "dataset")
     directory = tmp_path / "run"
-    args = [str(task), "--offline", "--run-dir", str(directory), "--time-budget", "90", "--n-jobs", "1"]
+    args = ["--cv-folds", "1", "--family-trials", "3", str(task), "--offline", "--run-dir", str(directory), "--time-budget", "90", "--n-jobs", "1"]
     first = run(parse_config(args))
     candidate = next(t for t in first["trials"] if t["trial_id"] == first["selected_trial"])
     expected = pd.read_csv(candidate["prediction_path"])["outcome"]
@@ -150,7 +150,7 @@ def test_resume_restores_best_predictions_when_refit_budget_is_exhausted(tmp_pat
     state = json.loads((directory / "state.json").read_text())
     state.update(active=True, elapsed_seconds=90, checkpoint_epoch=time.time())
     atomic_write_json(directory / "state.json", state)
-    resumed = run(parse_config([*args, "--resume"]))
+    resumed = run(parse_config(["--cv-folds", "1", "--family-trials", "3", *args, "--resume"]))
     assert resumed["final_fit"]["status"] == "skipped"
     assert np.allclose(pd.read_csv(task.parent / "submission.csv")["outcome"], expected)
 
@@ -166,6 +166,6 @@ def test_usage_above_budget_prevents_dispatch_of_the_returned_tool(tmp_path, mon
         return ModelResponse({"role": "assistant", "tool_calls": [{"id": "over-budget", "type": "function", "function": {
             "name": "run_experiment", "arguments": json.dumps({"hypothesis": "must not execute", "code": "from sklearn.dummy import DummyRegressor\ndef build_model(context):\n return DummyRegressor()"})}}]}, total_tokens=100000)
     monkeypatch.setattr(OpenAICompatibleProvider, "complete", complete)
-    report = run(parse_config([str(task), "--run-dir", str(tmp_path / "run"), "--time-budget", "90", "--max-trials", "2", "--max-tokens", "30000", "--n-jobs", "1"]))
+    report = run(parse_config(["--cv-folds", "1", "--family-trials", "3", str(task), "--run-dir", str(tmp_path / "run"), "--time-budget", "90", "--max-trials", "2", "--max-tokens", "30000", "--n-jobs", "1"]))
     assert report["stop_reason"] == "token_budget"
     assert not any(t["hypothesis"] == "must not execute" for t in report["trials"])

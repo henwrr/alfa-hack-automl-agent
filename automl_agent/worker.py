@@ -391,6 +391,9 @@ def _run_manifest(manifest_path: Path) -> dict:
     if not isinstance(manifest, dict):
         raise ValueError("Manifest должен быть JSON-объектом")
     mode = manifest.get("mode")
+    if mode == "evaluate_cv":
+        from .cv_worker import run_cv_manifest
+        return run_cv_manifest(manifest)
     if mode not in {"evaluate", "finalize"}:
         raise ValueError("mode должен быть evaluate или finalize")
     inputs = manifest.get("inputs")
@@ -432,8 +435,19 @@ def _run_manifest(manifest_path: Path) -> dict:
     model = builder(context)
     if not callable(getattr(model, "fit", None)) or not callable(getattr(model, "predict", None)):
         raise TypeError("build_model(context) должен вернуть estimator с fit и predict")
-    model.fit(train_x, train_y.to_numpy())
+    training_summary = None
+    if manifest.get("fit_options") or manifest.get("iteration_override") is not None:
+        from .training import fit_model
+        model, training_summary = fit_model(model, train_x, train_y.to_numpy(), context=context,
+                    options=manifest.get("fit_options"), iteration_override=manifest.get("iteration_override"))
+    else:
+        model.fit(train_x, train_y.to_numpy())
     estimator_details = _estimator_details(model)
+    if training_summary is not None:
+        estimator_details['training'] = training_summary
+        if training_summary.get('trained_parameters'):
+            estimator_details['parameters'] = training_summary['trained_parameters']
+            estimator_details['parameters_source'] = training_summary['parameters_source']
 
     artifact_dir = Path(manifest["artifact_dir"]).expanduser().resolve()
     artifact_dir.mkdir(parents=True, exist_ok=True)

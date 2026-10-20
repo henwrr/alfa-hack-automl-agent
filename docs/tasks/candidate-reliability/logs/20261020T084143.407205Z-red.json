@@ -1,0 +1,15 @@
+{
+  "phase": "red",
+  "command": [
+    ".venv/bin/python",
+    "-m",
+    "pytest",
+    "tests/test_cv_worker.py",
+    "-q"
+  ],
+  "cwd": "/Users/egoraprelsky/Desktop/coding/alfa_hackathon",
+  "started_at_utc": "2026-10-20T08:41:43.407205+00:00",
+  "returncode": 1,
+  "output": "...FF.                                                                   [100%]\n=================================== FAILURES ===================================\n__________________ test_host_rejects_reordered_oof_artifacts ___________________\n\ntmp_path = PosixPath('/private/var/folders/c2/43y9jwz953gddvrb_dkrwyy40000gn/T/pytest-of-egoraprelsky/pytest-218/test_host_rejects_reordered_oo0')\n\n    def test_host_rejects_reordered_oof_artifacts(tmp_path):\n        from automl_agent.evaluation import score_trial\n        task,split,path,manifest=fixture(tmp_path)\n        _run_manifest(path)\n        directory=Path(manifest['artifact_dir'])\n        indices=np.load(directory/'oof_indices.npy')\n        np.save(directory/'oof_indices.npy',indices[::-1])\n>       with pytest.raises(ValueError,match='OOF|indices|alignment'):\nE       Failed: DID NOT RAISE <class 'ValueError'>\n\ntests/test_cv_worker.py:78: Failed\n______________ test_alignment_rejects_out_of_range_probabilities _______________\n\n    def test_alignment_rejects_out_of_range_probabilities():\n        from automl_agent.prediction import aligned_probabilities\n        class Invalid:\n            classes_=['a','b']\n            def predict_proba(self,X):return np.array([[2.,1.]])\n>       with pytest.raises(ValueError,match='probability'):\nE       Failed: DID NOT RAISE <class 'ValueError'>\n\ntests/test_cv_worker.py:87: Failed\n=========================== short test summary info ============================\nFAILED tests/test_cv_worker.py::test_host_rejects_reordered_oof_artifacts - F...\nFAILED tests/test_cv_worker.py::test_alignment_rejects_out_of_range_probabilities\n2 failed, 4 passed in 1.18s\n",
+  "seconds": 1.339
+}
