@@ -127,7 +127,7 @@ def run_cv_manifest(manifest):
     last = summaries[-1]
     estimate = last['refit_seconds'] * len(X)/last['train_rows'] if last.get('refit_seconds') else None
     if last.get('trained_parameters'):
-        details['parameters'] = last['trained_parameters']
+        details['parameters'] = {**details.get('parameters', {}), **last['trained_parameters']}
         details['parameters_source'] = last['parameters_source']
     details['training'] = {'folds':summaries, 'final_iterations':final_trees,
                            'estimated_refit_seconds':estimate, 'oof_coverage':plan['coverage'],

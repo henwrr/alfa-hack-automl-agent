@@ -225,7 +225,7 @@ def run_final_ensemble(manifest: dict[str, Any]) -> dict[str, Any]:
         )
         details = _estimator_details(fitted)
         if training.get("trained_parameters"):
-            details["parameters"] = training["trained_parameters"]
+            details["parameters"] = {**details.get("parameters", {}), **training["trained_parameters"]}
             details["parameters_source"] = training["parameters_source"]
         fitted_members.append(fitted)
         member_records.append({"trial_id": member["trial_id"], "details": details, "training": training})

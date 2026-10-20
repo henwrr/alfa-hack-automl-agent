@@ -100,3 +100,10 @@ def build_model(context):return SimpleModel()
 ''')
     result=_run_manifest(path)
     assert result['status']=='ok' and result['preflight']['status']=='ok'
+
+
+def test_cv_fit_summary_preserves_native_thread_metadata(tmp_path):
+    _,_,path,manifest=fixture(tmp_path)
+    Path(manifest['code_path']).write_text(recipe_code({'family':'CatBoost','parameters':{'iterations':10}},'regression',n_jobs=1))
+    result=_run_manifest(path)
+    assert result['estimator_details']['parameters']['thread_count']==1

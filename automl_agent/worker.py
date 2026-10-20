@@ -449,7 +449,7 @@ def _run_manifest(manifest_path: Path) -> dict:
     if training_summary is not None:
         estimator_details['training'] = training_summary
         if training_summary.get('trained_parameters'):
-            estimator_details['parameters'] = training_summary['trained_parameters']
+            estimator_details['parameters'] = {**estimator_details.get('parameters', {}), **training_summary['trained_parameters']}
             estimator_details['parameters_source'] = training_summary['parameters_source']
 
     artifact_dir = Path(manifest["artifact_dir"]).expanduser().resolve()
