@@ -1,0 +1,19 @@
+{
+  "task": "OOF postprocessing selection and application",
+  "red": {
+    "command": "/Users/egoraprelsky/Desktop/coding/alfa_hackathon/.venv/bin/python -m pytest -q tests/test_postprocessing.py",
+    "result": "collection failed before implementation: ModuleNotFoundError for automl_agent.postprocessing"
+  },
+  "green": {
+    "focused_command": "/Users/egoraprelsky/Desktop/coding/alfa_hackathon/.venv/bin/python -m pytest -q tests/test_postprocessing.py",
+    "focused_result": "13 passed",
+    "full_command": "/Users/egoraprelsky/Desktop/coding/alfa_hackathon/.venv/bin/python -m pytest -q",
+    "full_result": "280 passed in 74.74s; 2 existing sklearn ConvergenceWarning messages in Linear-family tests"
+  },
+  "performance": {
+    "synthetic_shape": "87670 rows, 10 classes, 3 models, 5 folds",
+    "macro_f1_seconds": 2.99,
+    "macro_f1_parity": "300 randomized cases matched sklearn"
+  },
+  "scope": "No public-data full fit or Ollama run"
+}
