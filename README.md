@@ -26,7 +26,7 @@ uv pip install --python .venv/bin/python -r requirements-dev.txt
 
 requirements-mvp.txt — runtime-подмножество закреплённых версий из организаторского requirements.txt. ZIP содержит только это runtime-подмножество.
 
-CPU wheels для CatBoost, LightGBM и XGBoost могут требовать системную OpenMP runtime-библиотеку. Linux Docker image устанавливает libgomp1. При ошибке загрузки libomp/libgomp сверяйтесь с официальными инструкциями [LightGBM](https://lightgbm.readthedocs.io/en/v4.6.0/Installation-Guide.html), [XGBoost](https://xgboost.readthedocs.io/en/stable/install.html) и [CatBoost](https://catboost.ai/docs/en/concepts/python-installation), учитывая свою ОС и Python wheel. На локальной macOS-среде запуск использовал уже имеющийся sklearn/.dylibs/libomp.dylib через process-local rpath; Homebrew там не установлен. Это особенность той среды, а не новая зависимость проекта. Глобальные пути библиотек проект не меняет.
+CPU wheels для CatBoost, LightGBM и XGBoost могут требовать системную OpenMP runtime-библиотеку. Linux Docker image устанавливает libgomp1. При ошибке загрузки libomp/libgomp сверяйтесь с официальными инструкциями [LightGBM](https://lightgbm.readthedocs.io/en/v4.6.0/Installation-Guide.html), [XGBoost](https://xgboost.readthedocs.io/en/stable/install.html) и [CatBoost](https://catboost.ai/docs/en/concepts/python-installation), учитывая свою ОС и Python wheel. На локальной macOS-среде запуск использовал уже имеющийся sklearn/.dylibs/libomp.dylib через локально настроенный rpath wheel; Homebrew там не установлен. Это особенность той среды, а не новая зависимость проекта. Глобальные пути библиотек проект не меняет.
 
 ## Провайдер и запуск
 
@@ -44,7 +44,7 @@ export OPENAI_BASE_URL='https://адрес-endpoint/v1'
 
 ~~~bash
 export AUTOML_PROVIDER=ollama
-export OPENAI_API_KEY=ollama
+export OPENAI_API_KEY=''  # native Ollama не требует ключа
 export OPENAI_MODEL=qwen3.5:9b
 export OPENAI_BASE_URL=http://127.0.0.1:11434
 .venv/bin/python solution.py task.md --run-dir runs/qwen-run

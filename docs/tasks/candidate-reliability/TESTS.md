@@ -17,3 +17,8 @@ Core red:5поведенческихпаденийunknownrecipe/defaultinheritan
 - Host blending tests исходно падали на stub; теперь проверяют OOF-полусумму двух противоположных ошибок, несовместимый split и отказ при нехватке refit времени. Численная погрешность CSV проверяется с tolerance1e-12.
 - Final ensemble helper: 9 passed; root интеграция `test_timefirst/test_ensemble_selection/test_final_ensemble/test_research_cv_agent`: 14 passed, 7.72s. Дополнительный test на единый shortlist/reserve.
 - Default trial timeout увеличен до 1800s, чтобы оставить сильным пятифолдным моделям время на обучение. Исследование может завершиться по deadline или после восьми успешных неулучшающих гипотез; один готовый опыт при большом остатке времени недостаточен.
+
+## Полная интеграция и live protocol
+- `pytest -q`: 337 passed, 2 прежних warnings, 76.63s; log `20261020T085213.071401Z-green.json`.
+- `scripts/verify_run.py` на synthetic CV run независимо пересчитал все 6 метрик, проверил worker overlap, полный refit и совпадение загруженной модели с submission; exit0.
+- Actual Ollama wire выявил double-encoded experiments + flat decision fields + один лишний закрывающий символ внутри строки. Первые два вызова были отклонены до fit; дополнительное исправление decoder проверяет точный saved wire без обучения. При этом параметры научно неверной гипотезы не изменяются и по-прежнему проверяются recipes.
