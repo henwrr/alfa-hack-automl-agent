@@ -26,10 +26,12 @@ def main(argv=None) -> int:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--n-jobs", type=int, default=None)
     parser.add_argument("--run-dir", default=None)
+    parser.add_argument("--folds", type=int, default=int(os.getenv("AGENT_FOLDS", 2)),
+                        help="число валидационных фолдов (временных периодов или повторов holdout)")
     args = parser.parse_args(argv)
     budget = min(args.time_budget, 10800 - 120)
     agent = Agent(args.task_path, time_budget=budget, seed=args.seed, n_jobs=args.n_jobs,
-                  offline=args.offline, run_dir=args.run_dir)
+                  offline=args.offline, run_dir=args.run_dir, n_folds=args.folds)
     report = agent.run()
     print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
     return 0

@@ -30,43 +30,65 @@ def _time_like_column(train: pd.DataFrame, test: pd.DataFrame, cols: list[str]) 
                 values_te = (values_te - epoch).dt.total_seconds()
             else:
                 continue
-        if values_te.min() > values_tr.max() and values_tr.nunique() > 1:
+        # test «позже» train: строго позже или с общей только граничной точкой (тот же день на стыке)
+        later = values_te.min() > values_tr.max() or (values_te.min() >= values_tr.max() and values_te.quantile(0.05) > values_tr.quantile(0.95))
+        if later and values_tr.nunique() > 1:
             share = values_tr.nunique() / len(values_tr)
             if best is None or share < best[2]:
                 best = (col, values_tr, share)
     return (best[0], best[1]) if best else None
 
 
-def choose_split(task, train: pd.DataFrame, test: pd.DataFrame, seed: int = 42, valid_frac: float = 0.2) -> dict:
+def _take_periods(values: pd.Series, upper, share: float, n: int):
+    """Самые поздние периоды строго меньше upper, пока не наберём share*n строк."""
+    order = np.sort(values[values < upper].dropna().unique())[::-1] if upper is not None else np.sort(values.dropna().unique())[::-1]
+    threshold = None
+    for v in order:
+        threshold = v
+        if int(((values >= v) & ((values < upper) if upper is not None else True)).sum()) >= share * n:
+            break
+    return threshold
+
+
+def choose_split(task, train: pd.DataFrame, test: pd.DataFrame, seed: int = 42, valid_frac: float = 0.2,
+                 n_folds: int = 2) -> dict:
+    """Несколько фолдов: оценка по одному сплиту слишком шумная, чтобы различать гипотезы.
+
+    folds[0] — самый похожий на test (последний период при временном сдвиге); на нём считается диагностика.
+    """
     y = train[task.target]
-    idx = np.arange(len(train))
+    n = len(train)
+    idx = np.arange(n)
     time_col = _time_like_column(train, test, task.feature_cols)
     if time_col is not None:
         col, values = time_col
-        # Берём последние периоды, пока не наберём ~valid_frac строк.
-        order = np.sort(values.dropna().unique())[::-1]
-        threshold, taken = order[0], 0
-        for v in order:
-            taken = int((values >= v).sum())
-            threshold = v
-            if taken >= valid_frac * len(train):
+        folds, upper = [], None
+        for _ in range(max(1, n_folds)):
+            threshold = _take_periods(values, upper, valid_frac, n)
+            if threshold is None:
                 break
-        valid_mask = (values >= threshold).to_numpy()
-        if 0.05 <= valid_mask.mean() <= 0.5:
-            return {"kind": "time", "column": col, "threshold": float(threshold),
-                    "fit_idx": idx[~valid_mask], "valid_idx": idx[valid_mask],
-                    "note": (f"test целиком позже train по '{col}' (test.min > train.max) — "
-                             f"валидация на последних периодах train ({col} >= {threshold}), "
-                             "случайный holdout был бы слишком оптимистичен")}
+            valid_mask = ((values >= threshold) & ((values < upper) if upper is not None else True)).to_numpy()
+            fit_mask = (values < threshold).to_numpy()
+            if fit_mask.sum() < 0.3 * n or valid_mask.sum() < 0.03 * n:
+                break
+            folds.append((idx[fit_mask], idx[valid_mask]))
+            upper = threshold
+        if folds and 0.05 <= len(folds[0][1]) / n <= 0.5:
+            periods = ", ".join(f"{col}∈valid#{i + 1}: {len(v)} строк" for i, (_, v) in enumerate(folds))
+            return {"kind": "time", "column": col, "folds": folds, "fit_idx": folds[0][0], "valid_idx": folds[0][1],
+                    "note": (f"test целиком позже train по '{col}' (test.min > train.max) — валидация «обучение на прошлом, "
+                             f"проверка на следующем периоде», {len(folds)} фолд(а) ({periods}); случайный holdout был бы слишком оптимистичен")}
     stratify = None
-    if task.task_type == "classification":
-        counts = y.value_counts()
-        if counts.min() >= 2:
-            stratify = y
-    fit_idx, valid_idx = train_test_split(idx, test_size=valid_frac, random_state=seed, stratify=stratify)
-    kind = "stratified_holdout" if stratify is not None else "random_holdout"
-    return {"kind": kind, "column": None, "fit_idx": np.sort(fit_idx), "valid_idx": np.sort(valid_idx),
-            "note": f"{kind} {int(valid_frac * 100)}%: явного временного сдвига test относительно train не найдено"}
+    if task.task_type == "classification" and y.value_counts().min() >= max(2, n_folds):
+        stratify = y
+    # Повторный holdout 80/20 с разными seed: обучающая часть остаётся большой, а шум оценки усредняется.
+    folds = []
+    for i in range(max(1, n_folds)):
+        fit_idx, valid_idx = train_test_split(idx, test_size=valid_frac, random_state=seed + i, stratify=stratify)
+        folds.append((np.sort(fit_idx), np.sort(valid_idx)))
+    kind = ("stratified_" if stratify is not None else "random_") + "holdout" + (f"_x{n_folds}" if n_folds > 1 else "")
+    return {"kind": kind, "column": None, "folds": folds, "fit_idx": folds[0][0], "valid_idx": folds[0][1],
+            "note": f"{kind}: явного временного сдвига test относительно train не найдено"}
 
 
 def adversarial_check(task, train: pd.DataFrame, test: pd.DataFrame, seed: int = 42, n_jobs: int = 8,

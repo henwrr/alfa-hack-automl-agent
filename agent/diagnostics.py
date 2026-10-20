@@ -76,9 +76,9 @@ def diagnose(task, model, X_fit, y_fit, X_valid, y_valid, valid_pred, raw_valid:
         out["largest_errors"] = [{"y": round(float(y[i]), 3), "pred": round(float(p[i]), 3),
                                   **{c: (str(raw_valid.iloc[i][c])[:30]) for c in show}} for i in worst]
     else:
-        classes = list(task.classes)
-        labels = np.asarray(classes, dtype=object)[np.argmax(valid_pred, axis=1)]
-        y = np.asarray(y_valid, dtype=object)
+        classes = [str(c) for c in task.classes]
+        labels = np.asarray(classes)[np.argmax(valid_pred, axis=1)]
+        y = np.asarray(y_valid).astype(str)
         prec, rec, f1, sup = precision_recall_fscore_support(y, labels, labels=classes, zero_division=0)
         out["per_class"] = [{"class": str(c), "support": int(s), "precision": round(float(pr), 3),
                              "recall": round(float(r), 3), "f1": round(float(f), 3)}

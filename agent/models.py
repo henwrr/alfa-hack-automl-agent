@@ -86,6 +86,11 @@ class Model:
         if self.family not in FAMILIES:
             raise ValueError(f"неизвестное семейство {self.family}; доступны {FAMILIES}")
         self.params = {**DEFAULTS[self.family], **(spec.get("params") or {})}
+        # Медленный learning_rate требует больше деревьев; остановит early stopping.
+        lr = float(self.params.get("learning_rate", 0.05))
+        for key in ("n_estimators", "iterations"):
+            if key in self.params and self.family in {"lightgbm", "catboost", "xgboost"}:
+                self.params[key] = int(min(20000, max(self.params[key], 150 / max(lr, 1e-3))))
         self.seed = seed
         self.n_jobs = n_jobs
         self.best_iteration: int | None = None

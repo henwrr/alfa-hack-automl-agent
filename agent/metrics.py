@@ -33,7 +33,7 @@ def _mape(y, p):
 
 # Для классификации fn получает (y_true_labels, proba[n, k], classes).
 def _labels(proba, classes):
-    return np.asarray(classes, dtype=object)[np.argmax(proba, axis=1)]
+    return np.asarray(classes).astype(str)[np.argmax(proba, axis=1)]
 
 
 def _auc(y, proba, classes):
@@ -75,7 +75,8 @@ def score(task, y_true, pred) -> float:
     metric = METRICS[task.metric]
     if task.task_type == "regression":
         return metric.fn(y_true, pred)
-    return metric.fn(np.asarray(y_true, dtype=object), pred, list(task.classes))
+    # Метки как строки: смешанные/целочисленные object-метки sklearn не понимает («unknown is not supported»).
+    return metric.fn(np.asarray(y_true).astype(str), pred, [str(c) for c in task.classes])
 
 
 def better(a: float | None, b: float | None, maximize: bool) -> bool:

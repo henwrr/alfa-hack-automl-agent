@@ -145,3 +145,158 @@ def apply_ops(df: pd.DataFrame, cat_cols: list[str], ops: list[dict]) -> tuple[p
             raise ValueError(f"неизвестная операция признаков: {kind}")
     df = df.replace([np.inf, -np.inf], np.nan)
     return df, list(dict.fromkeys(c for c in cats if c in df.columns))
+
+
+# ---------------- операции, которым нужен таргет (выполняет хост, out-of-fold) ----------------
+
+TARGET_OPS_DOC = {
+    "target_encode": '{"op":"target_encode","cols":["a","b"],"smoothing":5} — средний таргет группы (ключ = комбинация cols) '
+                     'и число её строк в train; хост считает out-of-fold, утечки нет. Сильнейший признак, если '
+                     'одни и те же сущности (клиент, здание, устройство) повторяются в train и test — см. entity_keys',
+    "target_lag": '{"op":"target_lag","cols":["a","b"]} — таргет той же сущности в последнем ПРЕДЫДУЩЕМ периоде и '
+                  'сколько периодов назад он был (только при временной валидации; будущее не используется)',
+}
+
+
+def split_target_ops(ops):
+    plain = [op for op in ops or [] if op.get("op") not in TARGET_OPS_DOC]
+    target = [op for op in ops or [] if op.get("op") in TARGET_OPS_DOC]
+    return plain, target
+
+
+def _key(df: pd.DataFrame, cols: list[str]) -> np.ndarray:
+    if len(cols) == 1:
+        return df[cols[0]].astype(str).to_numpy()
+    return df[cols].astype(str).agg("|".join, axis=1).to_numpy()
+
+
+def _encode(train_key, train_y, apply_key, smoothing):
+    """train_y: [n] или [n, k] (one-hot для классов). Возвращает (enc[m, k], count[m])."""
+    Y = train_y.reshape(len(train_y), -1).astype(float)
+    frame = pd.DataFrame(Y).assign(_k=train_key)
+    sums = frame.groupby("_k").sum()
+    counts = frame.groupby("_k").size()
+    prior = Y.mean(axis=0)
+    s = sums.reindex(apply_key).to_numpy()
+    c = counts.reindex(apply_key).fillna(0).to_numpy()
+    enc = (np.nan_to_num(s) + prior * smoothing) / (c[:, None] + smoothing)
+    enc[c == 0] = np.nan  # новая сущность — честный пропуск, модель сама решит
+    return enc, c
+
+
+def _lag(key, times, Y, train_rows, n):
+    """Для каждой строки: среднее Y той же сущности в последний период строго раньше её периода."""
+    k = Y.shape[1]
+    hist = pd.DataFrame(Y[train_rows], columns=[f"y{j}" for j in range(k)]).assign(_k=key[train_rows], _t=times[train_rows])
+    hist = hist.dropna(subset=["_t"]).groupby(["_k", "_t"], as_index=False).mean().sort_values("_t")
+    hist["_t_prev"] = hist["_t"]
+    query = pd.DataFrame({"_k": key, "_t": times, "_row": np.arange(n)}).dropna(subset=["_t"]).sort_values("_t")
+    merged = pd.merge_asof(query, hist, on="_t", by="_k", allow_exact_matches=False).sort_values("_row")
+    lag = np.full((n, k), np.nan)
+    gap = np.full(n, np.nan)
+    rows = merged["_row"].to_numpy()
+    lag[rows] = merged[[f"y{j}" for j in range(k)]].to_numpy()
+    gap[rows] = (merged["_t"] - merged["_t_prev"]).to_numpy()
+    return lag, gap
+
+
+def apply_target_ops(df: pd.DataFrame, ops: list[dict], y_train: np.ndarray, n_train: int, train_rows: np.ndarray,
+                     classes: list | None, seed: int = 42, folds: int = 5, time_values=None) -> pd.DataFrame:
+    """df — признаки train+test подряд. train_rows — строки train, чьи таргеты разрешено видеть
+    (fit-часть при эксперименте, весь train в финале). Для них кодировка out-of-fold,
+    для всех остальных строк — по всем train_rows."""
+    from sklearn.model_selection import KFold
+
+    df = df.copy()
+    if classes:
+        index = {str(c): i for i, c in enumerate(classes)}
+        Y = np.eye(len(classes))[[index[str(v)] for v in y_train]]
+    else:
+        Y = np.asarray(y_train, float)
+    for op in ops:
+        cols = _existing(df, op["cols"])
+        key = _key(df, cols)
+        name = "__".join(cols)
+        if op["op"] == "target_lag":
+            if time_values is None:
+                raise ValueError("target_lag доступен только при временной валидации (есть столбец времени)")
+            lag, gap = _lag(key, np.asarray(time_values, float), Y.reshape(len(Y), -1), train_rows, len(df))
+            if classes:
+                for j, c in enumerate(classes):
+                    df[f"lag_{name}__{c}"] = lag[:, j]
+            else:
+                df[f"lag_{name}"] = lag[:, 0]
+            df[f"lag_{name}__gap"] = gap
+            continue
+        smoothing = float(op.get("smoothing", 5))
+        k = Y.shape[1] if Y.ndim == 2 else 1
+        enc = np.full((len(df), k), np.nan)
+        cnt = np.zeros(len(df))
+        other = np.setdiff1d(np.arange(len(df)), train_rows)
+        enc[other], cnt[other] = _encode(key[train_rows], Y[train_rows], key[other], smoothing)
+        for a, b in KFold(folds, shuffle=True, random_state=seed).split(train_rows):
+            rows_a, rows_b = train_rows[a], train_rows[b]
+            enc[rows_b], cnt[rows_b] = _encode(key[rows_a], Y[rows_a], key[rows_b], smoothing)
+        if classes:
+            for j, c in enumerate(classes):
+                df[f"te_{name}__{c}"] = enc[:, j]
+        else:
+            df[f"te_{name}"] = enc[:, 0]
+        df[f"te_{name}__count"] = cnt
+    return df
+
+
+def find_entity_keys(train: pd.DataFrame, test: pd.DataFrame, feature_cols: list[str], target: str,
+                     task_type: str, exclude=(), max_cols: int = 4, max_seconds: float = 30) -> list[dict]:
+    """Ищем комбинацию столбцов, которая ведёт себя как ID сущности: значения повторяются
+    внутри train, встречаются в test, а таргет внутри группы почти постоянен."""
+    import time
+
+    start = time.time()
+    n = len(train)
+    if task_type == "regression":
+        y = pd.to_numeric(train[target], errors="coerce").to_numpy(float)
+        if np.nanmin(y) >= 0 and pd.Series(y).skew() > 1:
+            y = np.log1p(y)
+        total = np.nanstd(y) or 1.0
+    else:
+        y = train[target].astype(str).to_numpy()
+    date_parts = ("__ts_days", "__year", "__month", "__day", "__dow", "__hour")
+    pool = [c for c in feature_cols if c not in exclude and not c.endswith(date_parts) and 10 < train[c].nunique() < 0.95 * n]
+    base_purity = 0.0 if task_type == "regression" else float(pd.Series(y).value_counts(normalize=True).iloc[0])
+    codes_tr = {c: train[c].astype(str).to_numpy() for c in pool}
+    codes_te = {c: test[c].astype(str).to_numpy() for c in pool}
+
+    def evaluate(cols):
+        kt = pd.Series(codes_tr[cols[0]]) if len(cols) == 1 else pd.Series(["|".join(t) for t in zip(*(codes_tr[c] for c in cols))])
+        ke = pd.Series(codes_te[cols[0]]) if len(cols) == 1 else pd.Series(["|".join(t) for t in zip(*(codes_te[c] for c in cols))])
+        match = float(ke.isin(set(kt)).mean())
+        size = kt.map(kt.value_counts())
+        rep = (size >= 2).to_numpy()
+        if rep.sum() < 50:
+            return None
+        if task_type == "regression":
+            frame = pd.DataFrame({"k": kt, "y": y})
+            resid = frame["y"] - frame.groupby("k")["y"].transform("mean")
+            purity = 1 - float(np.sqrt(np.nanmean(resid[rep] ** 2)) / total)
+        else:
+            frame = pd.DataFrame({"k": kt[rep], "y": y[rep]})
+            top = frame.groupby(["k", "y"]).size().groupby(level=0).max().sum()
+            purity = float(top / rep.sum())
+        return {"cols": list(cols), "test_rows_with_known_key": round(match, 3), "train_rows_repeated": round(float(rep.mean()), 3),
+                "target_purity_within_key": round(purity, 3), "score": match * float(rep.mean()) * purity}
+
+    best, chosen = None, []
+    while len(chosen) < max_cols and time.time() - start < max_seconds:
+        candidates = [r for c in pool if c not in chosen and (r := evaluate(chosen + [c])) is not None]
+        if not candidates:
+            break
+        top = max(candidates, key=lambda d: d["score"])
+        if best and top["score"] <= best["score"] * 1.02:
+            break
+        best, chosen = top, top["cols"]
+    # Ключ полезен, только если таргет внутри него заметно однороднее, чем в среднем по данным.
+    if not best or best["test_rows_with_known_key"] < 0.2 or best["target_purity_within_key"] < max(0.3, base_purity + 0.1):
+        return []
+    best["score"] = round(best["score"], 3)
+    return [best]

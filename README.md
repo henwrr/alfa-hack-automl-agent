@@ -44,19 +44,34 @@ python solution.py path/to/task.md --offline --time-budget 300
 Из решения в `aprelskiy_branch` перенесены сильные стороны: host-owned метрика (защита от взлома метрики),
 гарантированный submission при любых сбоях, атомарная запись, резерв времени на refit, журнал решений.
 
-## Первые результаты (offline, без LLM, бюджет 300 с, MacBook)
+## Результаты (offline-плейбук, без LLM, MacBook M3)
 
-| Задача | Валидация | Лучшая модель | Скор | Для сравнения: aprelskiy_branch |
+| Задача | Валидация | Скор | Время | aprelskiy_branch |
 |---|---|---|---|---|
-| Регрессия (RMSE ↓) | время: train Year 1–4 → valid Year 5 (test = Year 6) | XGBoost, log1p, индикаторы пропусков | **41.27** | 45.33 на случайном holdout (оптимистичнее) |
-| Классификация (Macro F1 ↑) | stratified holdout 20% | LightGBM, sqrt-balanced веса классов | **0.660** | 0.565 |
+| Регрессия (RMSE ↓) | 2 временных фолда: годы 1–4 → 5, 1–3 → 4 (test = год 6) | **34.54** | 100 с | 45.33 (случайный holdout, оптимистичнее) |
+| Классификация (Macro F1 ↑) | stratified holdout 80/20 × 2 | **0.662** | 9 мин | 0.565 |
 
-Находки по данным:
-- регрессия: весь test — `Year_Factor=6`, train — годы 1–5 → случайный holdout некорректен;
-- классификация: сильный сдвиг train/test (adversarial AUC ≈ 0.87), 38% строк train — дубликаты признаков.
+Что дало прирост и что не сработало — в [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md).
+
+Ключевые находки агента (делаются автоматически, для любой задачи):
+- **схема валидации**: test целиком позже train по столбцу → временные фолды;
+- **ключ сущности**: комбинация столбцов, по которой объекты повторяются в train и test
+  (здание: `floor_area+year_built+facility_type`; поток: `sbytes`) → `target_encode` / `target_lag`;
+- adversarial check сдвига train/test, даты-строки раскладываются на части, бинарные/мультиклассовые
+  вероятности в submission, если этого требует `sample_submission`.
+
+## Локальная LLM (Ollama)
+
+```bash
+ollama serve &              # затем: ollama pull qwen3.5:4b
+export OPENAI_BASE_URL=http://127.0.0.1:11434 OPENAI_MODEL=qwen3.5:4b AUTOML_PROVIDER=ollama
+python solution.py path/to/task.md --time-budget 1200
+```
+Ответы LLM сохраняются в `agent_runs/<run>/llm_calls.jsonl`. qwen3.5:9b требует ~7 ГБ памяти под модель
+и не запускается на Mac с 8 ГБ RAM.
 
 ## Дальше
 - подключить API организаторов (Qwen) и сравнить LLM-исследователя с offline-плейбуком;
-- K-fold/повторная валидация и ансамбль лучших моделей для длинных запусков;
+- ансамбль лучших моделей для длинных запусков; больше фолдов для шумных метрик (Macro F1);
 - подбор порогов/весов классов под Macro F1 в конце;
 - Dockerfile и сборка ZIP; проверка на Python 3.12 с версиями из `requirements.txt`.

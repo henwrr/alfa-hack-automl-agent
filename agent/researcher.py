@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import copy
 import json
+import time
 
-from .features import OPS_DOC
+from .features import OPS_DOC, TARGET_OPS_DOC
 from .llm import LLM, extract_json
 from .models import FAMILIES
 
@@ -26,7 +27,9 @@ def normalize_spec(spec: dict, task, best_spec: dict | None) -> dict:
     if spec.get("extends_best") and best_spec:
         base = copy.deepcopy(best_spec)
         base["params"] = {**base.get("params", {}), **(spec.get("params") or {})}
-        base["features"] = base.get("features", []) + list(spec.get("features") or [])
+        removed = [json.dumps(op, sort_keys=True) for op in spec.get("remove_features") or [] if isinstance(op, dict)]
+        kept = [op for op in base.get("features", []) if json.dumps(op, sort_keys=True) not in removed]
+        base["features"] = kept + list(spec.get("features") or [])
         for key in ("family", "target_transform", "class_weight"):
             if key in spec:
                 base[key] = spec[key]
@@ -38,11 +41,20 @@ def normalize_spec(spec: dict, task, best_spec: dict | None) -> dict:
         raise ValueError(f"family должен быть одним из {FAMILIES}")
     params = {k: v for k, v in (spec.get("params") or {}).items()
               if k not in _BANNED_PARAMS and isinstance(v, (int, float, str, bool))}
-    for key in ("n_estimators", "iterations"):
-        if key in params:
-            params[key] = int(min(max(int(params[key]), 50), 10000))
-    out = {"family": family, "params": params, "features": list(spec.get("features") or [])}
-    unknown = [op.get("op") for op in out["features"] if not isinstance(op, dict) or op.get("op") not in OPS_DOC]
+    # Число деревьев выбирает early stopping хоста; LLM часто ставит 500 и недообучает модель.
+    for key in ("n_estimators", "iterations", "num_boost_round", "num_iterations"):
+        params.pop(key, None)
+    if "learning_rate" in params:
+        params["learning_rate"] = float(min(max(float(params["learning_rate"]), 0.01), 0.3))
+    # одинаковые операции подряд из extends_best + ответа LLM — оставляем одну
+    features, seen = [], set()
+    for op in spec.get("features") or []:
+        key = json.dumps(op, sort_keys=True, ensure_ascii=False) if isinstance(op, dict) else str(op)
+        if key not in seen:
+            seen.add(key)
+            features.append(op)
+    out = {"family": family, "params": params, "features": features}
+    unknown = [op.get("op") for op in out["features"] if not isinstance(op, dict) or op.get("op") not in {**OPS_DOC, **TARGET_OPS_DOC}]
     if unknown:
         raise ValueError(f"неизвестные операции признаков: {unknown}")
     if task.task_type == "regression":
@@ -61,6 +73,7 @@ SYSTEM_PROMPT = """Ты — ведущий ML-исследователь в ав
 Твоя работа — цикл AutoResearch: посмотреть, ПОЧЕМУ текущая лучшая модель ошибается (диагностика ниже), сформулировать проверяемые гипотезы и описать эксперименты.
 
 Как думать:
+- Сначала прочитай host_findings: это факты, которые хост уже проверил (схема валидации, ключи сущностей, сдвиг).
 - Начинай с диагностики: какие сегменты/классы дают основную ошибку, есть ли смещение (mean_residual), недопрогноз хвостов, путаница классов, переобучение (train_part_score vs valid_score), сдвиг train/test.
 - Каждая гипотеза должна опираться на конкретный факт из диагностики или профиля и менять ОДНУ понятную вещь относительно лучшей модели (признаки ИЛИ модель ИЛИ таргет ИЛИ веса). Так результат интерпретируем.
 - Не повторяй уже проверенные спецификации. Если гипотеза не подтвердилась — учти это, не долби одно направление.
@@ -74,8 +87,10 @@ SYSTEM_PROMPT = """Ты — ведущий ML-исследователь в ав
   "target_transform": "none" | "log1p" | "sqrt",            (только регрессия)
   "class_weight": "none" | "balanced" | "sqrt_balanced",   (только классификация)
   "features": [операции признаков, применяются по порядку],
-  "extends_best": true   — взять спецификацию лучшей модели и ДОБАВИТЬ твои features / заменить указанные поля
+  "extends_best": true,  — взять спецификацию лучшей модели и ДОБАВИТЬ твои features / заменить указанные поля
+  "remove_features": [операции лучшей модели, которые надо убрать]  (только вместе с extends_best)
 }
+Не повторяй в features операции, которые уже есть в лучшей модели — они и так сохраняются.
 Операции признаков:
 %s
 
@@ -88,38 +103,78 @@ SYSTEM_PROMPT = """Ты — ведущий ML-исследователь в ав
   "stop": false
 }
 Число экспериментов — не больше max_experiments из budget. "stop": true — только если идеи исчерпаны.
-Пиши analysis и hypothesis по-русски.""" % "\n".join(f"- {v}" for v in OPS_DOC.values())
+Пиши analysis и hypothesis по-русски.""" % "\n".join(f"- {v}" for v in {**OPS_DOC, **TARGET_OPS_DOC}.values())
 
 
-def _compact_profile(profile: dict, limit: int = 60) -> dict:
-    feats = dict(list(profile.get("features", {}).items())[:limit])
-    return {**{k: v for k, v in profile.items() if k != "features"}, "features": feats}
+def _compact_profile(profile: dict, limit: int = 80) -> dict:
+    """Профиль в одну строку на признак — промпт должен влезать в контекст небольшой модели."""
+    lines = []
+    for name, info in list(profile.get("features", {}).items())[:limit]:
+        parts = [info["dtype"], f"nuniq={info['nunique']}"]
+        if info.get("missing_train") or info.get("missing_test"):
+            parts.append(f"miss={info['missing_train']:.2f}/{info['missing_test']:.2f}")
+        if info.get("unseen_in_test_share"):
+            parts.append(f"unseen_in_test={info['unseen_in_test_share']:.2f}")
+        if info.get("min") is not None:
+            parts.append(f"range=[{info['min']:.4g}, {info['max']:.4g}]")
+        if info.get("zeros_share", 0) > 0.05:
+            parts.append(f"zeros={info['zeros_share']:.2f}")
+        if info.get("description"):
+            parts.append(info["description"][:70])
+        lines.append(f"{name}: " + "; ".join(parts))
+    rest = {k: v for k, v in profile.items() if k != "features"}
+    return {**rest, "features (dtype; nunique; missing train/test; ...)": lines}
+
+
+def _compact_history(history: list[dict]) -> list[dict]:
+    out = []
+    for h in history:
+        item = {k: h.get(k) for k in ("id", "hypothesis", "status", "score", "delta_vs_best", "verdict") if h.get(k) is not None}
+        if h.get("spec"):
+            item["spec"] = h["spec"]
+        if h.get("error"):
+            item["error"] = h["error"][:300]
+        out.append(item)
+    return out
 
 
 class LLMResearcher:
     name = "llm"
 
-    def __init__(self, llm: LLM, log):
+    def __init__(self, llm: LLM, log, run_dir=None):
         self.llm = llm
         self.log = log
+        self.run_dir = run_dir
+
+    def _chat(self, messages):
+        started = time.time()
+        text = self.llm.chat(messages)
+        if self.run_dir is not None:
+            record = {"seconds": round(time.time() - started, 1), "prompt_chars": sum(len(m["content"]) for m in messages),
+                      "prompt_tokens": self.llm.last_prompt_tokens, "request": messages[-1]["content"], "response": text}
+            with open(self.run_dir / "llm_calls.jsonl", "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        self.log(f"LLM ответила за {time.time() - started:.0f}s (prompt ~{self.llm.last_prompt_tokens} токенов)")
+        return text
 
     def propose(self, state: dict) -> dict:
         payload = {
-            "task": state["task"], "task_description": state["description"][:6000],
+            "host_findings": state.get("host_findings", []),
+            "task": state["task"], "task_description": state["description"][:4000],
             "data_profile": _compact_profile(state["profile"]), "validation": state["validation"],
-            "train_test_shift": state["shift"], "history": state["history"][-25:],
+            "train_test_shift": state["shift"], "history": _compact_history(state["history"][-20:]),
             "best": state["best"], "budget": state["budget"],
             "previous_errors": state.get("errors", [])[-3:],
         }
         messages = [{"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)}]
-        text = self.llm.chat(messages)
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str, separators=(",", ":"))}]
+        text = self._chat(messages)
         try:
             answer = extract_json(text)
         except ValueError:
             messages += [{"role": "assistant", "content": text[:4000]},
                          {"role": "user", "content": "Ответ не распознан. Верни ТОЛЬКО JSON в описанном формате."}]
-            answer = extract_json(self.llm.chat(messages))
+            answer = extract_json(self._chat(messages))
         experiments = answer.get("experiments") or []
         if not isinstance(experiments, list):
             raise ValueError("experiments должен быть списком")
@@ -137,42 +192,66 @@ class OfflineResearcher:
         self.profile = profile
         self.done: set[str] = set()
 
-    def _plan(self, state) -> list[tuple[str, dict]]:
+    def _plan(self, state) -> list[tuple[str, dict, bool]]:
+        """(гипотеза, spec, strong). strong — «сильные ходы» с большим ожидаемым эффектом: хост делает их до LLM."""
         task, prof = self.task, self.profile
         best = (state.get("best") or {}).get("spec") or {}
         diag = (state.get("best") or {}).get("diagnostics") or {}
         missing = [c for c, i in prof["features"].items() if i.get("missing_train", 0) > 0.05]
         cats = [c for c in task.cat_cols if prof["features"].get(c, {}).get("nunique", 0) > 2]
-        plan: list[tuple[str, dict]] = []  # бейзлайн запускает сам хост
+        plan: list[tuple[str, dict, bool]] = []  # бейзлайн запускает сам хост
+
+        def add(hypothesis, spec, strong=False):
+            plan.append((hypothesis, spec, strong))
+
+        for key in prof.get("entity_keys", []):
+            add(f"ключ сущности {key['cols']} покрывает {key['test_rows_with_known_key']:.0%} test: "
+                "средний таргет той же сущности в train (out-of-fold)",
+                {"extends_best": True, "features": [{"op": "target_encode", "cols": key["cols"]}]}, strong=True)
+            if state.get("validation", {}).get("kind") == "time":
+                add(f"сущность {key['cols']} повторяется по периодам: её таргет в прошлом периоде (лаг)",
+                    {"extends_best": True, "features": [{"op": "target_lag", "cols": key["cols"]}]}, strong=True)
         if task.task_type == "regression":
             skew = prof["target"].get("skew", 0)
             if skew > 1:
-                plan.append((f"skew таргета {skew}: log1p должен уменьшить влияние хвоста на обучение",
-                             {"extends_best": True, "target_transform": "log1p"}))
-            plan.append(("CatBoost с нативными категориями может лучше использовать категориальные признаки",
-                         {"extends_best": True, "family": "catboost"}))
+                add(f"skew таргета {skew}: log1p должен уменьшить влияние хвоста на обучение",
+                    {"extends_best": True, "target_transform": "log1p"}, strong=True)
+            add("CatBoost с нативными категориями может лучше использовать категориальные признаки",
+                {"extends_best": True, "family": "catboost"}, strong=True)
         else:
-            plan.append(("CatBoost с нативными категориями", {"extends_best": True, "family": "catboost"}))
+            imbalance = prof["target"].get("imbalance_ratio", 1)
             worst = (diag.get("per_class") or [{}])[0]
-            plan.append((f"самый слабый класс {worst.get('class')} (F1={worst.get('f1')}): мягкие веса классов поднимут recall редких классов",
-                         {"extends_best": True, "class_weight": "sqrt_balanced"}))
-            plan.append(("полные balanced-веса классов под Macro F1", {"extends_best": True, "class_weight": "balanced"}))
+            if imbalance >= 3 and task.metric in {"macro_f1", "f1", "weighted_f1"}:
+                add(f"дисбаланс классов x{imbalance}, слабейший класс {worst.get('class')} (F1={worst.get('f1')}): "
+                    "мягкие веса классов поднимут recall редких классов",
+                    {"extends_best": True, "class_weight": "sqrt_balanced"}, strong=True)
+            add("CatBoost с нативными категориями", {"extends_best": True, "family": "catboost"})
+            if imbalance >= 3:
+                add("полные balanced-веса классов", {"extends_best": True, "class_weight": "balanced"})
         if missing:
-            plan.append((f"{len(missing)} признаков с пропусками >5%: явные индикаторы пропусков",
-                         {"extends_best": True, "features": [{"op": "missing_flags", "cols": missing[:20]}]}))
+            add(f"{len(missing)} признаков с пропусками >5%: явные индикаторы пропусков",
+                {"extends_best": True, "features": [{"op": "missing_flags", "cols": missing[:20]}]})
         if cats:
-            plan.append(("частотное кодирование категорий даёт деревьям порядок по популярности значения",
-                         {"extends_best": True, "features": [{"op": "freq_encode", "cols": cats[:10]}]}))
-        plan.append(("более медленное и глубокое обучение бустинга",
-                     {"extends_best": True, "params": {"learning_rate": 0.03, "num_leaves": 127} if best.get("family", "lightgbm") == "lightgbm"
-                      else {"learning_rate": 0.04, "depth": 8} if best.get("family") == "catboost" else {"learning_rate": 0.03}}))
-        plan.append(("другое семейство бустинга для разнообразия", {"extends_best": True, "family": "xgboost"}))
+            add("частотное кодирование категорий даёт деревьям порядок по популярности значения",
+                {"extends_best": True, "features": [{"op": "freq_encode", "cols": cats[:10]}]})
+        shift = state.get("shift") or {}
+        shifted = [d["feature"] for d in shift.get("top_shifted_features", [])[:5] if d["importance_share"] > 0.05]
+        if shift.get("auc", 0) > 0.8 and shifted:
+            add(f"сильный сдвиг train/test (AUC {shift['auc']}): убрать самые сдвинутые признаки {shifted}",
+                {"extends_best": True, "features": [{"op": "drop", "cols": shifted}]})
+        family = best.get("family", "lightgbm")
+        slow = ({"learning_rate": 0.03, "num_leaves": 127} if family == "lightgbm" else
+                {"learning_rate": 0.04, "depth": 8} if family == "catboost" else {"learning_rate": 0.03})
+        add("более медленное и глубокое обучение бустинга", {"extends_best": True, "params": slow})
+        add("другое семейство бустинга для разнообразия", {"extends_best": True, "family": "xgboost"})
         return plan
 
-    def propose(self, state: dict) -> dict:
+    def propose(self, state: dict, strong_only: bool = False) -> dict:
         out = []
         best_spec = (state.get("best") or {}).get("spec")
-        for hypothesis, spec in self._plan(state):
+        for hypothesis, spec, strong in self._plan(state):
+            if strong_only and not strong:
+                continue
             key = json.dumps(spec, sort_keys=True)
             try:
                 resolved = json.dumps(normalize_spec(spec, self.task, best_spec), sort_keys=True)
@@ -184,4 +263,5 @@ class OfflineResearcher:
             out.append({"hypothesis": hypothesis, "expected": "проверяется на валидации хоста", "spec": spec})
             if len(out) >= state["budget"]["max_experiments"]:
                 break
-        return {"analysis": "эвристический плейбук (без LLM)", "experiments": out, "stop": not out}
+        return {"analysis": "сильные ходы хоста" if strong_only else "эвристический плейбук (без LLM)",
+                "experiments": out, "stop": not out}

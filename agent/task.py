@@ -87,6 +87,17 @@ def _metric_from_text(text: str, task_type: str, n_classes: int) -> str:
     return "macro_f1" if n_classes > 2 else "roc_auc"
 
 
+def _sample_is_probability(sample_path, target) -> bool:
+    if sample_path is None:
+        return False
+    try:
+        values = pd.read_csv(sample_path, usecols=[target], nrows=1000)[target]
+    except (ValueError, KeyError):
+        return False
+    values = pd.to_numeric(values, errors="coerce").dropna()
+    return bool(len(values)) and values.between(0, 1).all() and not np.allclose(values, values.round())
+
+
 def _read_dictionary(path: Path | None) -> dict:
     if path is None:
         return {}
@@ -100,6 +111,32 @@ def _read_dictionary(path: Path | None) -> dict:
     for _, row in frame.iterrows():
         out[str(row[name_col])] = {k: (None if pd.isna(v) else str(v)) for k, v in row.items() if k != name_col}
     return out
+
+
+def _expand_dates(train: pd.DataFrame, test: pd.DataFrame, skip: set) -> list[str]:
+    """Строковые даты -> числовые части. Возвращает имена исходных столбцов-дат."""
+    found = []
+    for c in train.columns:
+        if c in skip or c not in test.columns or train[c].dtype != object:
+            continue
+        sample = train[c].dropna().astype(str).head(500)
+        if sample.empty or not sample.str.contains(r"\d{1,4}[-/.:]\d{1,2}").mean() > 0.9:
+            continue
+        parsed = pd.to_datetime(sample, errors="coerce", format="mixed")
+        if parsed.notna().mean() < 0.9:
+            continue
+        found.append(c)
+        for frame in (train, test):
+            d = pd.to_datetime(frame[c], errors="coerce", format="mixed")
+            frame[f"{c}__ts_days"] = (d - pd.Timestamp("1970-01-01")).dt.total_seconds() / 86400
+            frame[f"{c}__year"] = d.dt.year
+            frame[f"{c}__month"] = d.dt.month
+            frame[f"{c}__day"] = d.dt.day
+            frame[f"{c}__dow"] = d.dt.dayofweek
+            if (d.dt.hour.fillna(0) != 0).any():
+                frame[f"{c}__hour"] = d.dt.hour
+            frame.drop(columns=[c], inplace=True)
+    return found
 
 
 def discover(task_path: Path) -> tuple[Task, pd.DataFrame, pd.DataFrame]:
@@ -153,9 +190,14 @@ def discover(task_path: Path) -> tuple[Task, pd.DataFrame, pd.DataFrame]:
     metric = normalize_metric(_metric_from_text(text, task_type, len(classes)))
 
     output_mode = "label"
-    if task_type == "classification" and len(classes) == 2 and metric in {"roc_auc", "log_loss"}:
-        output_mode = "proba"
+    if task_type == "classification":
+        other = [c for c in sample_cols if c != id_col]
+        if len(classes) > 2 and len(other) == len(classes) and {str(c) for c in other} == {str(c) for c in classes}:
+            output_mode = "proba_multi"  # по колонке вероятности на каждый класс
+        elif len(classes) == 2 and (metric in {"roc_auc", "log_loss"} or _sample_is_probability(sample_path, target)):
+            output_mode = "proba"
 
+    _expand_dates(train, test, skip={id_col, target})
     feature_cols = [c for c in test.columns if c != id_col and c in train.columns]
     cat_cols = []
     for c in feature_cols:
