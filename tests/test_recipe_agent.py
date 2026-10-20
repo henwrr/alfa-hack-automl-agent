@@ -188,3 +188,13 @@ def test_classification_feedback_contains_host_class_diagnostics(tmp_path):
         assert sum(row['support'] for row in trial['diagnostics']['per_class'])==16
         assert {row['label'] for row in trial['diagnostics']['per_class']}=={'major','rare'}
         assert all(0<=row['recall']<=1 and 0<=row['f1']<=1 for row in trial['diagnostics']['per_class'])
+
+
+def test_regression_recipe_prompt_has_no_class_balancing_priority():
+    task=sample_task();task.task_type='regression';task.metric='rmse';task.classes=[]
+    messages=build_messages(task,{'features':{}},[],None,{'n_jobs':4,'experiment_mode':'recipe'})
+    assert messages[0]['content'].startswith('This task is REGRESSION')
+    assert 'For imbalanced classification and macro_f1' not in messages[0]['content']
+    content=json.loads(messages[1]['content'])
+    assert 'NOT target classes' in content['task_constraints']
+    assert 'median imputation' in content['pipeline_contract']['ExtraTrees/LightGBM/XGBoost']

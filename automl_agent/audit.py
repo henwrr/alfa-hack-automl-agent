@@ -180,7 +180,22 @@ def _source_for(event: str, payload: dict, baseline_trials: dict[str, bool]) -> 
 
 
 def _details_for(event: str, payload: dict) -> dict:
-    if event in {"family_comparison_started", "family_comparison_completed"}:
+    if event == 'family_comparison_completed':
+        comparison = payload.get('comparison', {})
+        if not isinstance(comparison, dict):
+            return {}
+        compact = {k:comparison[k] for k in ('metric','maximize','selected_trial','split_fingerprint') if k in comparison}
+        compact['trials'] = []
+        for row in comparison.get('trials', [])[:5]:
+            if not isinstance(row, dict):
+                continue
+            item = _pick(row, ('family','trial_id','status','metric','seconds'))
+            details = row.get('model_details', {})
+            if isinstance(details, dict):
+                item['model_details'] = _pick(details, ('class','parameters','parameters_source'))
+            compact['trials'].append(item)
+        return {'comparison':compact}
+    if event == "family_comparison_started":
         return _selected(payload, ("families", "planned", "limited_by_trial_budget", "split_fingerprint", "comparison"))
     if event in {"batch_started", "batch_completed", "batch_interrupted"}:
         return _selected(payload, ("trial_ids", "origin", "parallel_trials", "threads_per_trial", "memory_limit_mb", "remaining_seconds"))
@@ -498,6 +513,7 @@ def _project_dataset_diagnosis(payload: dict) -> dict:
 
 def _project_postprocessing(payload: dict) -> dict:
     plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else {}
+    payload = {**payload, **plan}
     accepted = plan.get("accepted", payload.get("accepted"))
     result = {"accepted": accepted} if isinstance(accepted, bool) else {}
     members = payload.get("member_trial_ids")
@@ -520,8 +536,13 @@ def _project_postprocessing(payload: dict) -> dict:
             result["class_multipliers"] = compact
     elif isinstance(multipliers, (list, tuple)):
         compact = []
-        for item in multipliers[:20]:
+        axis = payload.get('classes', [])
+        for index, item in enumerate(multipliers[:20]):
             if not isinstance(item, dict):
+                if index < len(axis) and (number := _public_number(item)) is not None:
+                    label = _public_label(axis[index])
+                    if label is not None:
+                        compact.append({'label':label,'multiplier':number})
                 continue
             label = _public_label(item.get("label", item.get("class")))
             number = _public_number(item.get("multiplier"))
@@ -529,6 +550,8 @@ def _project_postprocessing(payload: dict) -> dict:
                 compact.append({"label": label, "multiplier": number})
         if compact:
             result["class_multipliers"] = compact
+    if (reason := _public_text(payload.get('reason'), 240)) is not None:
+        result['reason'] = reason
     for key in ("baseline_score", "assessed_score", "calibrated_oof_score"):
         source = payload.get(key)
         if (number := _public_number(source)) is not None:

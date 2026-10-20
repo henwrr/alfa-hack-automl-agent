@@ -82,6 +82,7 @@ def choose_postprocessing(task, split, results, run_dir, *, remaining_seconds, o
                 probabilities=probabilities if task.task_type == 'classification' else None,
                 classes=classes, fold_ids=folds, metric=task.metric, maximize=task.maximize,
                 temporal=split.get('strategy') == 'forward_group')
+    plan['classes'] = classes
     plan['member_trial_ids'] = [r.trial_id for r in usable]
     plan['split_fingerprint'] = split['split_fingerprint']
     plan.setdefault('warnings', []).append('Meta-fold assessment reuses adaptively selected base OOF models; this is not nested CV or an independent test score.')

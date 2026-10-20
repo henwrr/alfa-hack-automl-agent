@@ -149,3 +149,30 @@ def test_trial_completion_projects_bounded_diagnostic_summary_only(tmp_path, cap
     terminal = capsys.readouterr().err
     assert terminal == human
     assert len(terminal) < 2000
+
+
+def test_actual_nested_postprocessing_plan_projects_scores_and_multiplier_axis(tmp_path):
+    journal=AuditJournal(tmp_path/'events.jsonl',echo=False)
+    journal.append('postprocessing_selected',plan={'accepted':True,'member_trial_ids':['trial_1','trial_2'],
+        'weights':[.75,.25],'classes':['common','rare'],'class_multipliers':[.75,1.5],
+        'baseline_score':.6,'assessed_score':.67,'calibrated_oof_score':.7,'assessment':'cross_fitted',
+        'reason':'meta_improvement','warnings':['not nested CV']})
+    projected=_records(tmp_path/'decisions.jsonl')[0]['details']
+    assert projected['member_trial_ids']==['trial_1','trial_2']
+    assert projected['weights']==[.75,.25]
+    assert projected['assessed_score']==.67
+    assert projected['class_multipliers']==[{'label':'common','multiplier':.75},{'label':'rare','multiplier':1.5}]
+    assert projected['reason']=='meta_improvement'
+    text=(tmp_path/'agent.log').read_text()
+    assert '0.67' in text and 'rare' in text
+
+
+def test_family_comparison_log_does_not_dump_fold_training_payload(tmp_path):
+    journal=AuditJournal(tmp_path/'events.jsonl',echo=False)
+    journal.append('family_comparison_completed',comparison={'selected_trial':'trial_1','metric':'rmse',
+        'trials':[{'family':'CatBoost','trial_id':'trial_1','status':'ok','metric':3.5,'seconds':2,
+            'model_details':{'class':'CatBoostRegressor','parameters':{'iterations':777},
+                'training':{'folds':[{'timing':123,'details':['value']*1000}]*5}}}]})
+    text=(tmp_path/'agent.log').read_text()
+    assert 'CatBoost' in text and '3.5' in text and '777' in text
+    assert len(text)<1500
