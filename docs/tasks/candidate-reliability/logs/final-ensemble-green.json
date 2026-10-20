@@ -1,0 +1,14 @@
+{
+  "stage": "final_ensemble_refit",
+  "test": "tests/test_final_ensemble.py",
+  "phase": "green",
+  "passed": 9,
+  "failed": 0,
+  "native_refit": "CatBoost classifier, balanced weights, selected iteration override 7",
+  "blends": ["CatBoost + ExtraTrees classification", "ExtraTrees regression"],
+  "classification_labels": "string labels with explicit global class axis and multipliers",
+  "serialization_reload": "predictions and probabilities reproduced",
+  "atomic_outputs": ["test_predictions.csv", "test_probabilities.npy", "probability_classes.json", "worker_result.json", "model.joblib"],
+  "public_fit": false,
+  "ollama": false
+}
