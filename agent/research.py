@@ -222,6 +222,22 @@ class Researcher:
             self.try_cfg(self.with_delta([{"type": "drop", "cols": zero}]), "drop_zero_importance",
                          "Удалить признаки с нулевой важностью")
 
+    def random_search(self, max_tries: int = 40):
+        """Оставшееся время — на случайный поиск гиперпараметров LightGBM вокруг лучшей конфигурации."""
+        rng = np.random.RandomState(len(self.tried))
+        space = {
+            "num_leaves": [15, 31, 63, 127, 255], "min_child_samples": [5, 10, 20, 50, 100],
+            "colsample_bytree": [0.3, 0.5, 0.7, 0.9], "subsample": [0.6, 0.8, 1.0],
+            "reg_lambda": [0.0, 0.1, 1.0, 5.0, 20.0], "reg_alpha": [0.0, 0.1, 1.0],
+        }
+        tries = 0
+        while tries < max_tries and self.time_ok():
+            k = rng.choice(list(space), size=rng.randint(1, 4), replace=False)
+            params = {str(name): space[name][rng.randint(len(space[name]))] for name in k}
+            tries += 1
+            self.try_cfg(self.with_delta([{"type": "lgbm_params", "params": params}]),
+                         "random_search", f"LightGBM params {params}")
+
     # ---------- LLM-гипотезы ----------
     def llm_round(self):
         if self.llm is None or not self.llm.available():
@@ -283,6 +299,7 @@ class Researcher:
                 break
         if self.time_ok():
             self.drop_useless()
+        self.random_search()
 
         self.final_phase()
         log(f"LLM calls={getattr(self.llm, 'calls', 0)} tokens in/out="
@@ -299,6 +316,10 @@ class Researcher:
         slow_lr = 0.02 if cur_lr <= 0.05 else 0.03
         slow["params"]["learning_rate"] = slow_lr
         candidates.append(("lgbm_slow", 1.2 * cur_lr / slow_lr, slow))
+        for seed in (7, 2024):
+            sc = copy.deepcopy(self.best_cfg)
+            sc["params"]["random_state"] = seed
+            candidates.append((f"lgbm_seed{seed}", 1.0, sc))
         for name, factor, cfg in candidates:
             if remaining() < 1.3 * self.est_time(factor) + 30:
                 log(f"  skip {name}: not enough time")
@@ -310,7 +331,7 @@ class Researcher:
                 continue
             log(f"  {name}: {self.metric}={res['score']:.5f} t={res['time']:.0f}s")
             self.journal.add(name, "финальная модель для ансамбля", cfg, res, True, note="final")
-            fam = "lgbm" if name == "lgbm_slow" else name
+            fam = "lgbm_slow" if name == "lgbm_slow" else name
             if fam not in self.pool or self.s(res) > self.s(self.pool[fam][1]):
                 self.pool[fam] = (cfg, res)
             self.maybe_write(res, name)
