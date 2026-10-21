@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import time
+
+import numpy as np
 
 from .features import OPS_DOC, TARGET_OPS_DOC
 from .llm import LLM, extract_json
@@ -126,9 +129,14 @@ def _compact_profile(profile: dict, limit: int = 80) -> dict:
     return {**rest, "features (dtype; nunique; missing train/test; ...)": lines}
 
 
-def _compact_history(history: list[dict]) -> list[dict]:
+def _compact_history(history: list[dict], maximize: bool, best_n: int = 6, recent_n: int = 10) -> list[dict]:
+    """В промпт — лучшие и последние опыты, а не всё подряд: за час набирается 200+ опытов."""
+    ok = [h for h in history if h.get("status") == "ok" and h.get("score") is not None]
+    top = sorted(ok, key=lambda h: h["score"], reverse=maximize)[:best_n]
+    recent = history[-recent_n:]
+    keep = {id(h) for h in top + recent}
     out = []
-    for h in history:
+    for h in [h for h in history if id(h) in keep]:
         item = {k: h.get(k) for k in ("id", "hypothesis", "status", "score", "delta_vs_best", "verdict") if h.get(k) is not None}
         if h.get("spec"):
             item["spec"] = h["spec"]
@@ -157,17 +165,42 @@ class LLMResearcher:
         self.log(f"LLM ответила за {time.time() - started:.0f}s (prompt ~{self.llm.last_prompt_tokens} токенов)")
         return text
 
+    @staticmethod
+    def _fit_prompt(payload: dict, state: dict) -> str:
+        """Промпт должен влезать в контекст (у Ollama 16k токенов, ~0.33 токена на символ).
+        Урезаем по очереди: историю, детали диагностики, описание задачи, профиль."""
+        limit = int(os.getenv("AGENT_PROMPT_CHARS", 36000)) - len(SYSTEM_PROMPT)
+        dump = lambda: json.dumps(payload, ensure_ascii=False, default=str, separators=(",", ":"))  # noqa: E731
+        maximize = state["task"]["maximize"]
+        steps = [
+            lambda: payload.update(history=_compact_history(state["history"], maximize, best_n=4, recent_n=6)),
+            lambda: payload["best"] and payload["best"].get("diagnostics", {}).pop("largest_errors", None),
+            lambda: payload.update(task_description=state["description"][:1500]),
+            lambda: payload["best"] and payload["best"].get("diagnostics", {}).pop("error_by_target_decile", None),
+            lambda: payload.update(history=_compact_history(state["history"], maximize, best_n=3, recent_n=3)),
+            lambda: payload.update(data_profile=_compact_profile(state["profile"], limit=25)),
+        ]
+        text = dump()
+        for step in steps:
+            if len(text) <= limit:
+                break
+            step()
+            text = dump()
+        return text
+
     def propose(self, state: dict) -> dict:
         payload = {
             "host_findings": state.get("host_findings", []),
             "task": state["task"], "task_description": state["description"][:4000],
             "data_profile": _compact_profile(state["profile"]), "validation": state["validation"],
-            "train_test_shift": state["shift"], "history": _compact_history(state["history"][-20:]),
-            "best": state["best"], "budget": state["budget"],
+            "train_test_shift": state["shift"],
+            "history": _compact_history(state["history"], state["task"]["maximize"]),
+            "history_note": f"показаны лучшие и последние опыты из {len(state['history'])}",
+            "best": copy.deepcopy(state["best"]), "budget": state["budget"],
             "previous_errors": state.get("errors", [])[-3:],
         }
-        messages = [{"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str, separators=(",", ":"))}]
+        content = self._fit_prompt(payload, state)
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": content}]
         text = self._chat(messages)
         try:
             answer = extract_json(text)
@@ -246,10 +279,44 @@ class OfflineResearcher:
         add("другое семейство бустинга для разнообразия", {"extends_best": True, "family": "xgboost"})
         return plan
 
+    SPACE = {
+        "lightgbm": {"num_leaves": [15, 31, 63, 127, 255], "min_child_samples": [5, 10, 20, 50, 100],
+                     "colsample_bytree": [0.4, 0.6, 0.8, 1.0], "subsample": [0.6, 0.8, 1.0],
+                     "reg_lambda": [0.0, 1.0, 5.0, 20.0], "learning_rate": [0.02, 0.03, 0.05, 0.08]},
+        "catboost": {"depth": [4, 6, 8, 10], "l2_leaf_reg": [1, 3, 10, 30], "learning_rate": [0.03, 0.05, 0.08],
+                     "random_strength": [0.5, 1, 3]},
+        "xgboost": {"max_depth": [4, 6, 8, 10], "min_child_weight": [1, 5, 20], "colsample_bytree": [0.5, 0.7, 0.9],
+                    "subsample": [0.6, 0.8, 1.0], "reg_lambda": [0.0, 1.0, 10.0], "learning_rate": [0.02, 0.04, 0.08]},
+    }
+
+    def _tuning_moves(self, state, n: int = 4) -> list[tuple[str, dict, bool]]:
+        """Когда идеи плейбука кончились: случайный поиск вокруг лучшей модели и в других семействах.
+
+        Полезно и само по себе, и как источник разнообразных сильных моделей для финального ансамбля.
+        """
+        best = (state.get("best") or {}).get("spec") or {}
+        rng = np.random.default_rng(len(state.get("seen_specs", ())) + 7)
+        moves = []
+        for i in range(n):
+            family = best.get("family", "lightgbm") if i % 2 == 0 else str(rng.choice(list(self.SPACE)))
+            if family not in self.SPACE:
+                family = "lightgbm"
+            space = self.SPACE[family]
+            keys = rng.choice(list(space), size=min(3, len(space)), replace=False)
+            params = {str(k): (v.item() if hasattr(v, "item") else v) for k in keys for v in [rng.choice(space[k])]}
+            spec = {"extends_best": True, "family": family, "params": params}
+            if family == best.get("family"):
+                spec["params"] = {**best.get("params", {}), **params}
+            moves.append((f"тюнинг {family}: {params}", spec, False))
+        return moves
+
     def propose(self, state: dict, strong_only: bool = False) -> dict:
         out = []
         best_spec = (state.get("best") or {}).get("spec")
-        for hypothesis, spec, strong in self._plan(state):
+        plan = self._plan(state)
+        if not strong_only:
+            plan = plan + self._tuning_moves(state, n=8)
+        for hypothesis, spec, strong in plan:
             if strong_only and not strong:
                 continue
             key = json.dumps(spec, sort_keys=True)

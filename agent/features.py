@@ -247,9 +247,11 @@ def apply_target_ops(df: pd.DataFrame, ops: list[dict], y_train: np.ndarray, n_t
 
 
 def find_entity_keys(train: pd.DataFrame, test: pd.DataFrame, feature_cols: list[str], target: str,
-                     task_type: str, exclude=(), max_cols: int = 4, max_seconds: float = 30) -> list[dict]:
+                     task_type: str, exclude=(), max_cols: int = 4, max_seconds: float = 30) -> tuple[list[dict], list[dict]]:
     """Ищем комбинацию столбцов, которая ведёт себя как ID сущности: значения повторяются
-    внутри train, встречаются в test, а таргет внутри группы почти постоянен."""
+    внутри train, встречаются в test, а таргет внутри группы почти постоянен.
+
+    Возвращает (ключи сущности, одиночные столбцы-кандидаты для target_encode)."""
     import time
 
     start = time.time()
@@ -286,17 +288,23 @@ def find_entity_keys(train: pd.DataFrame, test: pd.DataFrame, feature_cols: list
         return {"cols": list(cols), "test_rows_with_known_key": round(match, 3), "train_rows_repeated": round(float(rep.mean()), 3),
                 "target_purity_within_key": round(purity, 3), "score": match * float(rep.mean()) * purity}
 
-    best, chosen = None, []
+    best, chosen, singles = None, [], []
     while len(chosen) < max_cols and time.time() - start < max_seconds:
         candidates = [r for c in pool if c not in chosen and (r := evaluate(chosen + [c])) is not None]
         if not candidates:
             break
+        if not chosen:
+            singles = sorted(candidates, key=lambda d: -d["score"])
         top = max(candidates, key=lambda d: d["score"])
         if best and top["score"] <= best["score"] * 1.02:
             break
         best, chosen = top, top["cols"]
     # Ключ полезен, только если таргет внутри него заметно однороднее, чем в среднем по данным.
+    # одиночные столбцы с однородным таргетом — кандидаты для target_encode (подсказка LLM)
+    te_candidates = [
+        {"col": d["cols"][0], "purity": d["target_purity_within_key"], "test_coverage": d["test_rows_with_known_key"]}
+        for d in singles if d["target_purity_within_key"] >= max(0.3, base_purity + 0.1)][:6]
     if not best or best["test_rows_with_known_key"] < 0.2 or best["target_purity_within_key"] < max(0.3, base_purity + 0.1):
-        return []
+        return [], te_candidates
     best["score"] = round(best["score"], 3)
-    return [best]
+    return [best], te_candidates

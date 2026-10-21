@@ -8,3 +8,4 @@ data/
 tests/last_llm_request.json
 .DS_Store
 .idea/
+dist/

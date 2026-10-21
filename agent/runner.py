@@ -8,6 +8,9 @@ import sys
 import tempfile
 import time
 import traceback
+import threading
+from concurrent.futures import Future
+from concurrent.futures import TimeoutError as FuturesTimeout
 from datetime import datetime
 from pathlib import Path
 
@@ -46,6 +49,7 @@ class Agent:
         self.best: dict | None = None
         self.seen_specs: set[str] = set()
         self.llm_seconds: list[float] = []
+        self.fold_preds: dict[str, list] = {}  # exp_id -> предсказания на валидации каждого фолда (для ансамбля)
         self.submission_path = self.task_path.parent / "submission.csv"
 
     # ---------- служебное ----------
@@ -92,12 +96,13 @@ class Agent:
             self.shift = {"error": str(exc)[:300]}
         try:
             exclude = [self.split["column"]] if self.split["column"] else []
-            self.entity_keys = find_entity_keys(self.train, self.test, t.feature_cols, t.target, t.task_type, exclude=exclude)
+            self.entity_keys, self.te_candidates = find_entity_keys(self.train, self.test, t.feature_cols, t.target,
+                                                                    t.task_type, exclude=exclude)
             for k in self.entity_keys:
                 self.log(f"Найден ключ сущности {k['cols']}: {k['test_rows_with_known_key']:.0%} строк test встречаются в train, "
                          f"однородность таргета внутри ключа {k['target_purity_within_key']}")
         except Exception as exc:
-            self.entity_keys = []
+            self.entity_keys, self.te_candidates = [], []
             self.log(f"Поиск ключа сущности не удался: {exc}")
         self.profile["entity_keys"] = self.entity_keys
         llm = LLM()
@@ -144,7 +149,12 @@ class Agent:
         if not self.best:
             return 30.0
         ratio = self.n_train / max(len(self.split["fit_idx"]), 1)
-        return self.best["seconds"] / len(self.split["folds"]) * ratio * 1.3 + 15
+        single = self.best["seconds"] / len(self.split["folds"]) * ratio * 1.3
+        # финал: несколько seed и (в длинном запуске) несколько моделей ансамбля
+        seeds = max(1, int(os.getenv("AGENT_FINAL_SEEDS", 3)))
+        members = 3 if self.time_budget >= 1200 and len(self.fold_preds) >= 3 else 1
+        # на коротком бюджете не отдаём финалу больше трети времени: лишние seed просто не успеют
+        return min(single * seeds * members, max(single, self.time_budget / 3)) + 15
 
     def run_experiment(self, hypothesis: str, raw_spec: dict, source: str) -> dict:
         exp_id = f"exp_{len(self.history) + 1:03d}"
@@ -160,7 +170,7 @@ class Agent:
             feats, cats, target_ops = self._plain_features(spec)
             folds = self.split["folds"]
             limit = max(30.0, min(self.remaining - self._refit_estimate() - 10, max(90.0, 0.35 * self.time_budget)))
-            fold_scores, iterations, first = [], [], None
+            fold_scores, iterations, first, preds = [], [], None, []
             for i, (fit_idx, valid_idx) in enumerate(folds):
                 X, X_test = self._with_target_ops(feats, target_ops, fit_idx)
                 model = Model(spec, self.task, seed=self.seed, n_jobs=self.n_jobs)
@@ -170,6 +180,7 @@ class Agent:
                 if not np.isfinite(value):
                     raise ValueError("метрика не конечна")
                 fold_scores.append(value)
+                preds.append(np.asarray(pred, dtype=np.float32))
                 if model.best_iteration:
                     iterations.append(model.best_iteration)
                 if i == 0:
@@ -191,6 +202,10 @@ class Agent:
                              "seconds": record["seconds"], "best_iteration": best_iteration, "diagnostics": diag}
                 self.write_submission(model.predict(X_test), note=f"safety ({exp_id}, обучена на fit-части)")
             record["status"] = "ok"
+            self.fold_preds[exp_id] = preds
+            if os.getenv("AGENT_SAVE_PREDS"):
+                (self.run_dir / "fold_preds").mkdir(exist_ok=True)
+                np.savez_compressed(self.run_dir / "fold_preds" / f"{exp_id}.npz", *preds)
         except Exception as exc:
             record.pop("verdict", None)
             record["error"] = f"{type(exc).__name__}: {exc}"[:1500]
@@ -223,11 +238,44 @@ class Agent:
                 "budget": {"remaining_seconds": round(self.remaining), "typical_experiment_seconds": round(self._avg_experiment_seconds()),
                            "max_experiments": max_experiments}}
 
-    def _playbook_move(self, reason: str) -> None:
+    def _playbook_move(self, reason: str) -> bool:
         proposal = self.fallback.propose(self._state(1))
         if proposal["experiments"] and self._can_start_experiment():
             exp = proposal["experiments"][0]
             self.run_experiment(exp["hypothesis"], exp["spec"], "offline")
+            return True
+        return False
+
+    def _ask(self, researcher, state) -> dict:
+        """Спрашиваем исследователя. Если это LLM — пока она думает, хост сам гоняет ходы плейбука/тюнинга:
+        ответ LLM идёт десятки секунд–минуты, эксперимент — секунды, процессор не должен простаивать."""
+        if researcher is self.fallback:
+            return researcher.propose(state)
+        started = time.time()
+        # daemon-нить: если LLM не успеет к концу бюджета, она не задержит выход процесса
+        future: Future = Future()
+
+        def call():
+            try:
+                future.set_result(researcher.propose(state))
+            except BaseException as exc:  # noqa: BLE001 — передаём в основной поток
+                future.set_exception(exc)
+
+        threading.Thread(target=call, daemon=True).start()
+        busy = 0
+        while not future.done() and self._can_start_experiment():
+            if not self._playbook_move("пока LLM думает"):
+                break
+            busy += 1
+        wait = max(1.0, self.remaining - self._refit_estimate() - 10)
+        try:
+            proposal = future.result(timeout=wait)
+        except FuturesTimeout:
+            raise LLMError(f"LLM не успела ответить до резерва времени ({wait:.0f}s)") from None
+        self.llm_seconds.append(time.time() - started)
+        if busy:
+            self.log(f"Пока LLM думала ({time.time() - started:.0f}s), хост провёл {busy} эксп.")
+        return proposal
 
     def _findings(self) -> list[str]:
         """Главные факты, которые хост нашёл сам, — коротко и на первом месте в промпте."""
@@ -236,6 +284,9 @@ class Agent:
             out.append(f"Ключ сущности {k['cols']}: {k['test_rows_with_known_key']:.0%} строк test имеют такой же ключ в train, "
                        f"таргет внутри ключа однороден (purity {k['target_purity_within_key']}). "
                        "Операции target_encode / target_lag по этому ключу обычно дают самый большой выигрыш.")
+        if self.te_candidates:
+            out.append("Кандидаты для target_encode (столбец: однородность таргета внутри значения, покрытие test): "
+                       + ", ".join(f"{d['col']} ({d['purity']}, {d['test_coverage']:.0%})" for d in self.te_candidates))
         if self.shift.get("auc"):
             top = [d["feature"] for d in self.shift.get("top_shifted_features", [])[:5]]
             out.append(f"Adversarial AUC train vs test = {self.shift['auc']} ({self.shift.get('verdict')}); сильнее всего сдвинуты {top}.")
@@ -270,10 +321,7 @@ class Agent:
             state = self._state(max(1, min(per_round, fit)))
             researcher = self.researcher
             try:
-                llm_started = time.time()
-                proposal = researcher.propose(state)
-                if researcher is not self.fallback:
-                    self.llm_seconds.append(time.time() - llm_started)
+                proposal = self._ask(researcher, state)
             except (LLMError, ValueError) as exc:
                 llm_failures += 1
                 self.errors.append(f"researcher: {exc}")
@@ -293,6 +341,9 @@ class Agent:
                     self.researcher = self.fallback
                 proposal = self.fallback.propose(state)
                 researcher = self.fallback
+            if not proposal["experiments"] and self.researcher is not self.fallback:
+                # Плейбук пуст, но LLM ещё в строю (сбой был разовым) — спрашиваем её снова в следующем раунде.
+                continue
             if not proposal["experiments"]:
                 self.log("Идеи закончились — переходим к финальной модели")
                 break
@@ -302,28 +353,121 @@ class Agent:
                 record = self.run_experiment(str(exp.get("hypothesis", ""))[:500], exp.get("spec") or {}, researcher.name)
                 if "уже проверялась" in record.get("error", "") and researcher is not self.fallback:
                     self._playbook_move("повтор от LLM заменён ходом плейбука")
-            if researcher is not self.fallback and self._can_start_experiment():
-                # Один ход плейбука за раунд: проверенные улучшения не теряются, пока LLM ищет своё.
-                self._playbook_move("ход плейбука в раунде LLM")
 
     # ---------- финал ----------
+    # ---------- финал ----------
+    def _blend_scores(self, members: list[str], folds=None) -> list[float]:
+        out = []
+        for i, (_, valid_idx) in enumerate(self.split["folds"]):
+            if folds is not None and i not in folds:
+                continue
+            pred = np.mean([self.fold_preds[m][i] for m in members], axis=0)
+            out.append(score(self.task, self.y.iloc[valid_idx], pred))
+        return out
+
+    def _greedy(self, candidates: list[str], folds, max_steps: int) -> list[str]:
+        """Жадный отбор с повторами (Caruana) по среднему скору на заданных фолдах."""
+        maximize = self.task.maximize
+        mean = lambda ms: float(np.mean(self._blend_scores(ms, folds)))  # noqa: E731
+        chosen = [(max if maximize else min)(candidates, key=lambda c: mean([c]))]
+        current = mean(chosen)
+        for _ in range(max_steps):
+            value, cid = (max if maximize else min)((mean(chosen + [c]), c) for c in candidates)
+            if not better(value, current, maximize):
+                break
+            chosen.append(cid)
+            current = value
+        return chosen
+
+    def select_ensemble(self, max_candidates: int = 10, max_steps: int = 15) -> list[str]:
+        """Ансамбль принимается, если он честно обобщается: отбор на одном фолде, проверка на другом.
+
+        Для каждого фолда A: жадный отбор только по A и лучшая одиночная модель по A; обе оцениваются на
+        остальных фолдах. Если в среднем ансамбль выигрывает на НЕвиденных фолдах — берём ансамбль,
+        отобранный по всем фолдам. Иначе выигрыш — подгонка под валидацию, берём одну модель.
+        """
+        maximize = self.task.maximize
+        ok = [h for h in self.history if h["status"] == "ok" and h["id"] in self.fold_preds]
+        ok.sort(key=lambda h: h["score"], reverse=maximize)
+        candidates = [h["id"] for h in ok[:max_candidates]]
+        n_folds = len(self.split["folds"])
+        if len(candidates) < 2:
+            return [self.best["id"]]
+        gains = []
+        if n_folds >= 2:
+            for a in range(n_folds):
+                others = [i for i in range(n_folds) if i != a]
+                members = self._greedy(candidates, [a], max_steps)
+                single = self._greedy(candidates, [a], 0)
+                blend_score = float(np.mean(self._blend_scores(members, others)))
+                single_score = float(np.mean(self._blend_scores(single, others)))
+                gains.append((blend_score - single_score) * (1 if maximize else -1))
+        chosen = self._greedy(candidates, None, max_steps)
+        single = self._blend_scores([self.best["id"]])
+        blend = self._blend_scores(chosen)
+        if len(set(chosen)) < 2 or (gains and np.mean(gains) <= 0):
+            self.log(f"Ансамбль не обобщается: выигрыш на невиденных фолдах {[round(g, 5) for g in gains]} — берём одну модель")
+            return [self.best["id"]]
+        self.ensemble_scores = {"single": single, "ensemble": blend, "cross_fold_gains": gains}
+        self.log(f"Ансамбль: {dict(pd.Series(chosen).value_counts())} — {self.task.metric} "
+                 f"{np.mean(single):.5f} → {np.mean(blend):.5f} (по фолдам {[round(v, 5) for v in blend]}); "
+                 f"выигрыш на невиденных фолдах {[round(g, 5) for g in gains]}")
+        return chosen
+
+    def _refit(self, record: dict, seconds: float, seed: int):
+        spec = record["spec"]
+        feats, cats, target_ops = self._plain_features(spec)
+        X, X_test = self._with_target_ops(feats, target_ops, np.arange(self.n_train))
+        n_est = None
+        if record.get("best_iteration"):
+            scale = self.n_train / max(len(self.split["fit_idx"]), 1)
+            n_est = max(50, int(record["best_iteration"] * min(scale, 1.3)))
+        model = Model(spec, self.task, seed=seed, n_jobs=self.n_jobs)
+        model.fit(X, self.y, cats, seconds=seconds, n_estimators=n_est)
+        return model.predict(X_test), n_est
+
     def finalize(self) -> None:
+        """Дообучение на всём train. Каждый член ансамбля — на нескольких seed (среднее): разброс одной модели
+        от seed заметный, усреднение 3 seed дало −0.5 RMSE и +0.015 Macro F1 на обоих фолдах."""
         if not self.best:
             raise RuntimeError("ни один эксперимент не завершился успешно")
-        spec = self.best["spec"]
-        self.log(f"Финал: {self.best['id']} {self.task.metric}={self.best['score']:.6f}; дообучаем на всём train")
+        by_id = {h["id"]: h for h in self.history}
         try:
-            feats, cats, target_ops = self._plain_features(spec)
-            X, X_test = self._with_target_ops(feats, target_ops, np.arange(self.n_train))
-            n_est = None
-            if self.best["best_iteration"]:
-                scale = self.n_train / max(len(self.split["fit_idx"]), 1)
-                n_est = max(50, int(self.best["best_iteration"] * min(scale, 1.3)))
-            model = Model(spec, self.task, seed=self.seed, n_jobs=self.n_jobs)
-            model.fit(X, self.y, cats, seconds=max(20.0, self.remaining - 10), n_estimators=n_est)
-            self.write_submission(model.predict(X_test), note=f"final ({self.best['id']}, весь train, {n_est} итераций)")
+            members = self.select_ensemble()
         except Exception as exc:
-            self.log(f"Финальное дообучение не удалось ({exc}); остаётся safety-submission")
+            self.log(f"Отбор ансамбля не удался ({exc}); берём одну модель")
+            members = [self.best["id"]]
+        counts = pd.Series(members).value_counts()
+        order = list(counts.index)  # самые весомые — первыми
+        n_seeds = max(1, int(os.getenv("AGENT_FINAL_SEEDS", 3)))
+        self.log(f"Финал: {order} {self.task.metric}={self.best['score']:.6f} (лучшая одиночная); "
+                 f"дообучаем на всём train, до {n_seeds} seed на модель")
+        ratio = self.n_train / max(len(self.split["fit_idx"]), 1)
+        per_member: dict[str, list] = {m: [] for m in order}
+        # Сначала по одному seed каждому члену, потом добавляем seed по кругу — пока есть время.
+        for round_ in range(n_seeds):
+            for exp_id in order:
+                record = by_id[exp_id]
+                need = record["seconds"] / len(self.split["folds"]) * ratio * 1.3 + 5
+                if any(per_member.values()) and self.remaining - 10 < need:
+                    continue
+                try:
+                    pred, n_est = self._refit(record, seconds=max(20.0, self.remaining - 10), seed=self.seed + round_)
+                    per_member[exp_id].append(pred)
+                    self.log(f"  дообучена {exp_id} seed={self.seed + round_} ({n_est} итераций)")
+                except Exception as exc:
+                    self.log(f"  дообучение {exp_id} seed={self.seed + round_} не удалось: {exc}")
+        done = [m for m in order if per_member[m]]
+        if done:
+            preds = [np.mean(per_member[m], axis=0) for m in done]
+            weights = np.asarray([counts[m] for m in done], float)
+            blend = np.average(np.stack(preds), axis=0, weights=weights)
+            seeds_used = {m: len(per_member[m]) for m in done}
+            self.write_submission(blend, note=f"final ({seeds_used} seed, весь train)")
+        else:
+            self.log("Финальное дообучение не удалось; остаётся safety-submission")
+        order = done
+        self.final_members = order
 
     def write_submission(self, pred, note: str) -> None:
         t = self.task
@@ -357,6 +501,8 @@ class Agent:
             self.log(f"Цикл исследования прерван: {exc}")
         self.finalize()
         report = {"task": self.task.summary(), "validation": self.split["note"], "shift": self.shift,
+                  "final_members": getattr(self, "final_members", None),
+                  "ensemble_scores": getattr(self, "ensemble_scores", None),
                   "best": {k: v for k, v in (self.best or {}).items() if k != "diagnostics"},
                   "experiments": len(self.history), "elapsed_seconds": round(self.elapsed, 1),
                   "llm": {"model": self.llm.model, "calls": self.llm.calls, "tokens": self.llm.used_tokens} if self.llm else None,

@@ -6,6 +6,7 @@
 """
 
 import json
+import time
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -32,6 +33,7 @@ calls = {"n": 0}
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        time.sleep(float(sys.argv[2]) if len(sys.argv) > 2 else 0)  # имитация медленной LLM
         Path(__file__).with_name("last_llm_request.json").write_text(json.dumps(body, ensure_ascii=False, indent=1))
         answer = ANSWERS[min(calls["n"], len(ANSWERS) - 1)]
         calls["n"] += 1

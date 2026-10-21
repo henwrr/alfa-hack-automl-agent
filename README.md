@@ -33,7 +33,7 @@ python solution.py path/to/task.md --offline --time-budget 300
 | `agent/features.py` | язык признаков для LLM: `missing_flags`, `freq_encode`, `group_stats`, `ratio`, `row_stats`, `combine`, `custom` (произвольный pandas-код с AST-фильтром) и др. |
 | `agent/diagnostics.py` | **почему модель ошибается**: train vs valid, ошибка по децилям таргета, худшие сегменты (доля ошибки vs доля строк, смещение), крупнейшие ошибки, F1 по классам, топ путаниц, важность признаков |
 | `agent/researcher.py` | LLM-исследователь (JSON-спецификации экспериментов) и offline-плейбук как запасной вариант |
-| `agent/runner.py` | цикл, учёт времени и резерв на финальное дообучение, safety-submission, журнал |
+| `agent/runner.py` | цикл: сильные ходы хоста → LLM (пока она думает, хост параллельно гоняет плейбук/тюнинг) → финал: честный ансамбль (отбор на одном фолде, проверка на другом) и усреднение по seed; учёт времени, safety-submission, журнал |
 
 Принципы:
 - метрику считает только хост на своей валидации — LLM не может «объявить» скор;
@@ -44,12 +44,15 @@ python solution.py path/to/task.md --offline --time-budget 300
 Из решения в `aprelskiy_branch` перенесены сильные стороны: host-owned метрика (защита от взлома метрики),
 гарантированный submission при любых сбоях, атомарная запись, резерв времени на refit, журнал решений.
 
-## Результаты (offline-плейбук, без LLM, MacBook M3)
+## Результаты (локальная валидация, MacBook M3)
 
-| Задача | Валидация | Скор | Время | aprelskiy_branch |
-|---|---|---|---|---|
-| Регрессия (RMSE ↓) | 2 временных фолда: годы 1–4 → 5, 1–3 → 4 (test = год 6) | **34.54** | 100 с | 45.33 (случайный holdout, оптимистичнее) |
-| Классификация (Macro F1 ↑) | stratified holdout 80/20 × 2 | **0.662** | 9 мин | 0.565 |
+| Режим | Регрессия (RMSE ↓) | Классификация (Macro F1 ↑) |
+|---|---|---|
+| aprelskiy_branch | 45.33 (случайный holdout, оптимистичнее) | 0.565 |
+| По умолчанию: 600 с, без LLM | **33.85** | **0.664** |
+| 1 час + LLM qwen3.5:4b | **33.44** | **0.670** |
+
+Регрессия — 2 временных фолда (годы 1–4 → 5, 1–3 → 4; test = год 6), классификация — stratified holdout 80/20 × 2.
 
 Что дало прирост и что не сработало — в [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md).
 
@@ -59,6 +62,18 @@ python solution.py path/to/task.md --offline --time-budget 300
   (здание: `floor_area+year_built+facility_type`; поток: `sbytes`) → `target_encode` / `target_lag`;
 - adversarial check сдвига train/test, даты-строки раскладываются на части, бинарные/мультиклассовые
   вероятности в submission, если этого требует `sample_submission`.
+
+## Сборка для платформы
+
+```bash
+python scripts/package.py      # -> dist/solution.zip (solution.py + agent/, ~40 КБ)
+```
+Архив проверен: распакован в чужую папку с пробелами/кириллицей и запущен на задаче. `Dockerfile` повторяет
+условия платформы (Python 3.12, версии из requirements.txt), но собрать его на этой машине пока не удалось —
+Docker не установлен.
+
+Полезные переменные: `AGENT_TIME_BUDGET` (по умолчанию 600 с), `AGENT_FOLDS` (2), `AGENT_FINAL_SEEDS` (3),
+`AGENT_SAVE_PREDS=1` (сохранять предсказания фолдов для анализа), `AGENT_MAX_TOKENS`, `AGENT_LLM_TIMEOUT`.
 
 ## Локальная LLM (Ollama)
 
@@ -71,7 +86,6 @@ python solution.py path/to/task.md --time-budget 1200
 и не запускается на Mac с 8 ГБ RAM.
 
 ## Дальше
-- подключить API организаторов (Qwen) и сравнить LLM-исследователя с offline-плейбуком;
-- ансамбль лучших моделей для длинных запусков; больше фолдов для шумных метрик (Macro F1);
-- подбор порогов/весов классов под Macro F1 в конце;
-- Dockerfile и сборка ZIP; проверка на Python 3.12 с версиями из `requirements.txt`.
+- подключить API организаторов (Qwen 27B) и сравнить LLM-исследователя с offline-плейбуком;
+- проверить на Python 3.12 с версиями из `requirements.txt` (собрать Dockerfile или conda-окружение);
+- выбрать бюджет времени для сабмита (`AGENT_TIME_BUDGET`, по умолчанию 600 с из 10 800 доступных).
