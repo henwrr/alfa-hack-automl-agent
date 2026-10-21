@@ -96,6 +96,7 @@ class Model:
         self.best_iteration: int | None = None
         self.model = None
         self.importance: dict[str, float] = {}
+        self.patience = int(spec.get("early_stopping_rounds") or EARLY_STOPPING)
 
     # --- таргет ---
     def _y_forward(self, y):
@@ -176,7 +177,7 @@ class Model:
         if es is not None:
             fit_kw["eval_set"] = [(X.iloc[es], y[es])]
             fit_kw["eval_sample_weight"] = [w[es]] if w is not None else None
-            callbacks.append(lgb.early_stopping(EARLY_STOPPING, verbose=False))
+            callbacks.append(lgb.early_stopping(self.patience, verbose=False))
         est.fit(X.iloc[tr], y[tr], callbacks=callbacks, **fit_kw)
         self.model = est
         self.best_iteration = int(est.best_iteration_ or est.n_estimators) if es is not None else est.n_estimators
@@ -205,7 +206,7 @@ class Model:
         kw = {"callbacks": [_Stop()]}
         if es is not None:
             kw["eval_set"] = Pool(X.iloc[es], y[es], cat_features=cats, weight=w[es] if w is not None else None)
-            kw["early_stopping_rounds"] = EARLY_STOPPING
+            kw["early_stopping_rounds"] = self.patience
             kw["use_best_model"] = True
         est.fit(train_pool, **kw)
         self.model = est
@@ -227,7 +228,7 @@ class Model:
         if n_estimators:
             params["n_estimators"] = n_estimators
         if es is not None:
-            params["early_stopping_rounds"] = EARLY_STOPPING
+            params["early_stopping_rounds"] = self.patience
         est = xgb.XGBClassifier(**params) if self.task.task_type == "classification" else xgb.XGBRegressor(**params)
         kw = {"sample_weight": w_tr, "verbose": False}
         if es is not None:

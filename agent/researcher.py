@@ -16,15 +16,14 @@ import numpy as np
 
 from .features import OPS_DOC, TARGET_OPS_DOC
 from .llm import LLM, extract_json
-from .models import FAMILIES
-
-_BANNED_PARAMS = {"n_jobs", "thread_count", "nthread", "num_threads", "device", "device_type", "task_type",
-                  "gpu_id", "random_state", "random_seed", "seed", "verbose", "verbosity", "callbacks",
-                  "train_dir", "allow_writing_files", "early_stopping_rounds", "eval_metric", "cat_features"}
-
+from .schemas import ExperimentSpec, Proposal, ValidationError, format_validation_error, proposal_json_schema
 
 def normalize_spec(spec: dict, task, best_spec: dict | None) -> dict:
-    """Проверяем и чистим спецификацию от LLM. Ошибки -> ValueError с понятным текстом."""
+    """Спецификация от LLM/плейбука -> проверенный словарь. Ошибки -> ValueError с понятным текстом.
+
+    Проверку делает pydantic-схема ExperimentSpec (schemas.py); здесь — только слияние с лучшей
+    моделью (extends_best / remove_features) и выбор полей под тип задачи.
+    """
     if not isinstance(spec, dict):
         raise ValueError("spec должен быть объектом")
     if spec.get("extends_best") and best_spec:
@@ -33,41 +32,24 @@ def normalize_spec(spec: dict, task, best_spec: dict | None) -> dict:
         removed = [json.dumps(op, sort_keys=True) for op in spec.get("remove_features") or [] if isinstance(op, dict)]
         kept = [op for op in base.get("features", []) if json.dumps(op, sort_keys=True) not in removed]
         base["features"] = kept + list(spec.get("features") or [])
-        for key in ("family", "target_transform", "class_weight"):
+        for key in ("family", "target_transform", "class_weight", "early_stopping_rounds"):
             if key in spec:
                 base[key] = spec[key]
         if spec.get("family") and spec["family"] != best_spec.get("family"):
             base["params"] = dict(spec.get("params") or {})
         spec = base
-    family = spec.get("family", "lightgbm")
-    if family not in FAMILIES:
-        raise ValueError(f"family должен быть одним из {FAMILIES}")
-    params = {k: v for k, v in (spec.get("params") or {}).items()
-              if k not in _BANNED_PARAMS and isinstance(v, (int, float, str, bool))}
-    # Число деревьев выбирает early stopping хоста; LLM часто ставит 500 и недообучает модель.
-    for key in ("n_estimators", "iterations", "num_boost_round", "num_iterations"):
-        params.pop(key, None)
-    if "learning_rate" in params:
-        params["learning_rate"] = float(min(max(float(params["learning_rate"]), 0.01), 0.3))
-    # одинаковые операции подряд из extends_best + ответа LLM — оставляем одну
-    features, seen = [], set()
-    for op in spec.get("features") or []:
-        key = json.dumps(op, sort_keys=True, ensure_ascii=False) if isinstance(op, dict) else str(op)
-        if key not in seen:
-            seen.add(key)
-            features.append(op)
-    out = {"family": family, "params": params, "features": features}
-    unknown = [op.get("op") for op in out["features"] if not isinstance(op, dict) or op.get("op") not in {**OPS_DOC, **TARGET_OPS_DOC}]
-    if unknown:
-        raise ValueError(f"неизвестные операции признаков: {unknown}")
+    try:
+        checked = ExperimentSpec.model_validate(spec)
+    except ValidationError as exc:
+        raise ValueError(f"spec не прошёл проверку: {format_validation_error(exc)}") from None
+    out = {"family": checked.family, "params": checked.params,
+           "features": [op.model_dump() for op in checked.features]}
     if task.task_type == "regression":
-        out["target_transform"] = spec.get("target_transform", "none")
-        if out["target_transform"] not in {"none", "log1p", "sqrt"}:
-            raise ValueError("target_transform: none | log1p | sqrt")
+        out["target_transform"] = checked.target_transform
     else:
-        out["class_weight"] = spec.get("class_weight", "none")
-        if out["class_weight"] not in {"none", "balanced", "sqrt_balanced"}:
-            raise ValueError("class_weight: none | balanced | sqrt_balanced")
+        out["class_weight"] = checked.class_weight
+    if checked.early_stopping_rounds is not None:
+        out["early_stopping_rounds"] = checked.early_stopping_rounds
     return out
 
 
@@ -89,6 +71,7 @@ SYSTEM_PROMPT = """Ты — ведущий ML-исследователь в ав
   "params": {гиперпараметры семейства; число деревьев подбирается early stopping, n_jobs/seed задаёт хост},
   "target_transform": "none" | "log1p" | "sqrt",            (только регрессия)
   "class_weight": "none" | "balanced" | "sqrt_balanced",   (только классификация)
+  "early_stopping_rounds": 20..1000 — терпение early stopping (по умолчанию 100; больше — для медленного learning_rate),
   "features": [операции признаков, применяются по порядку],
   "extends_best": true,  — взять спецификацию лучшей модели и ДОБАВИТЬ твои features / заменить указанные поля
   "remove_features": [операции лучшей модели, которые надо убрать]  (только вместе с extends_best)
@@ -156,7 +139,7 @@ class LLMResearcher:
 
     def _chat(self, messages):
         started = time.time()
-        text = self.llm.chat(messages)
+        text = self.llm.chat(messages, schema=proposal_json_schema())
         if self.run_dir is not None:
             record = {"seconds": round(time.time() - started, 1), "prompt_chars": sum(len(m["content"]) for m in messages),
                       "prompt_tokens": self.llm.last_prompt_tokens, "request": messages[-1]["content"], "response": text}
@@ -203,16 +186,15 @@ class LLMResearcher:
         messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": content}]
         text = self._chat(messages)
         try:
-            answer = extract_json(text)
-        except ValueError:
+            answer = Proposal.model_validate(extract_json(text))
+        except (ValueError, ValidationError) as exc:
+            detail = format_validation_error(exc) if isinstance(exc, ValidationError) else str(exc)
             messages += [{"role": "assistant", "content": text[:4000]},
-                         {"role": "user", "content": "Ответ не распознан. Верни ТОЛЬКО JSON в описанном формате."}]
-            answer = extract_json(self._chat(messages))
-        experiments = answer.get("experiments") or []
-        if not isinstance(experiments, list):
-            raise ValueError("experiments должен быть списком")
-        return {"analysis": str(answer.get("analysis", ""))[:2000], "experiments": experiments,
-                "stop": bool(answer.get("stop", False))}
+                         {"role": "user", "content": f"Ответ не прошёл проверку ({detail}). Верни ТОЛЬКО JSON в описанном формате."}]
+            answer = Proposal.model_validate(extract_json(self._chat(messages)))
+        return {"analysis": answer.analysis[:2000],
+                "experiments": [e.model_dump() for e in answer.experiments],
+                "stop": answer.stop}
 
 
 class OfflineResearcher:
@@ -277,6 +259,8 @@ class OfflineResearcher:
                 {"learning_rate": 0.04, "depth": 8} if family == "catboost" else {"learning_rate": 0.03})
         add("более медленное и глубокое обучение бустинга", {"extends_best": True, "params": slow})
         add("другое семейство бустинга для разнообразия", {"extends_best": True, "family": "xgboost"})
+        if family != "lightgbm":
+            add("LightGBM как альтернативное семейство (разнообразие для ансамбля)", {"extends_best": True, "family": "lightgbm"})
         return plan
 
     SPACE = {

@@ -40,17 +40,26 @@ class LLM:
     def available(self) -> bool:
         return bool(self.model) and self.used_tokens < self.max_total_tokens
 
-    def chat(self, messages: list[dict], max_tokens: int = 4000, temperature: float = 0.4, retries: int = 2) -> str:
+    def chat(self, messages: list[dict], max_tokens: int = 4000, temperature: float = 0.4, retries: int = 2,
+             schema: dict | None = None) -> str:
+        """schema — JSON Schema ответа: Ollama получает её в `format` (жёстко ограничивает вывод),
+        OpenAI-совместимый API — в `response_format`, только если AGENT_STRUCTURED=1 (поддержка у
+        провайдеров разная, без флага не рискуем получить 400)."""
         if not self.available:
             raise LLMError("LLM недоступна: нет OPENAI_MODEL или исчерпан бюджет токенов")
         if self.provider == "ollama":
             url = self.base_url.removesuffix("/v1") + "/api/chat"
             body = {"model": self.model, "messages": messages, "stream": False, "think": False,
                     "options": {"num_ctx": self.num_ctx, "num_predict": max_tokens, "temperature": temperature}}
+            if schema is not None and os.getenv("AGENT_STRUCTURED", "1") != "0":
+                body["format"] = schema
         else:
             url = f"{self.base_url}/chat/completions"
             body = {"model": self.model, "messages": messages, "max_tokens": max_tokens, "temperature": temperature,
                     **self.extra_body}
+            if schema is not None and os.getenv("AGENT_STRUCTURED") == "1":
+                body["response_format"] = {"type": "json_schema",
+                                           "json_schema": {"name": "proposal", "schema": schema}}
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"

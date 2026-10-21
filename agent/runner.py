@@ -238,6 +238,16 @@ class Agent:
                 "budget": {"remaining_seconds": round(self.remaining), "typical_experiment_seconds": round(self._avg_experiment_seconds()),
                            "max_experiments": max_experiments}}
 
+    def baseline_family(self) -> str:
+        """Бейзлайн — LightGBM + early stopping: быстрый «движок» для отбора признаков.
+
+        Проверено: сам по себе CatBoost-бейзлайн лучше (регрессия 46.2 vs 49.1 RMSE, бинарная 0.825 vs 0.820 AUC),
+        но жадный цикл с него застревает: поверх CatBoost+TE лаг и log-таргет уже не дают прироста, опыты в
+        2–4 раза медленнее, и за 600 с итог хуже (35.38 vs 34.05). CatBoost пробуется сильным ходом сразу после
+        признаков. В мультиклассе CatBoost хуже и медленнее в 34 раза (0.560 vs 0.601, 888 с vs 26 с).
+        """
+        return os.getenv("AGENT_BASELINE", "lightgbm")
+
     def _playbook_move(self, reason: str) -> bool:
         proposal = self.fallback.propose(self._state(1))
         if proposal["experiments"] and self._can_start_experiment():
@@ -300,7 +310,8 @@ class Agent:
         return self.remaining > self._refit_estimate() + self._avg_experiment_seconds() * 1.1 + 10
 
     def research(self) -> None:
-        self.run_experiment("бейзлайн: LightGBM с дефолтами и early stopping", {"family": "lightgbm"}, "host")
+        family = self.baseline_family()
+        self.run_experiment(f"бейзлайн: {family} с дефолтами и early stopping", {"family": family}, "host")
         # Фаза 1: сильные ходы (ключ сущности, лаг, log-таргет, веса классов) — секунды, большой эффект.
         # LLM дальше исследует поверх уже сильной модели, а не тратит раунды на очевидное.
         while self._can_start_experiment():
