@@ -156,12 +156,14 @@ class Agent:
         # на коротком бюджете не отдаём финалу больше трети времени: лишние seed просто не успеют
         return min(single * seeds * members, max(single, self.time_budget / 3)) + 15
 
-    def run_experiment(self, hypothesis: str, raw_spec: dict, source: str) -> dict:
+    def run_experiment(self, hypothesis: str, raw_spec: dict, source: str, base_spec: dict | None = None) -> dict:
+        """base_spec — от чего считать extends_best (по умолчанию текущая лучшая модель)."""
         exp_id = f"exp_{len(self.history) + 1:03d}"
         record = {"id": exp_id, "source": source, "hypothesis": hypothesis, "status": "error"}
         started = time.time()
         try:
-            spec = normalize_spec(raw_spec, self.task, self.best["spec"] if self.best else None)
+            base = base_spec if base_spec is not None else (self.best["spec"] if self.best else None)
+            spec = normalize_spec(raw_spec, self.task, base)
             record["spec"] = spec
             key = json.dumps(spec, sort_keys=True)
             if key in self.seen_specs:
@@ -238,6 +240,43 @@ class Agent:
                 "budget": {"remaining_seconds": round(self.remaining), "typical_experiment_seconds": round(self._avg_experiment_seconds()),
                            "max_experiments": max_experiments}}
 
+    def _strong_phase(self, first: dict) -> None:
+        """Фаза 1: сильные ходы (ключ сущности, лаг, log-таргет, веса классов, смена семейства).
+
+        Проверяются цепочкой на быстрой модели (LightGBM), независимо от того, с какого семейства начат запуск:
+        жадный цикл со старта CatBoost застревал — поверх CatBoost+TE лаг и log-таргет не принимались,
+        хотя на LightGBM они давали −2.5 и −1.1 RMSE. Найденный набор признаков переносится на лучшее семейство.
+        """
+        fast = "lightgbm"
+        chain = first if first.get("status") == "ok" and first["spec"]["family"] == fast else \
+            self.run_experiment(f"быстрая модель для отбора признаков: {fast}", {"family": fast}, "host")
+        if chain.get("status") != "ok":
+            chain = first
+        if chain.get("status") != "ok":
+            return
+        chain_spec, chain_score = chain["spec"], chain["score"]
+        while self._can_start_experiment():
+            state = self._state(1)
+            state["best"] = {**(state["best"] or {}), "spec": chain_spec}
+            proposal = self.fallback.propose(state, strong_only=True)
+            if not proposal["experiments"]:
+                break
+            exp = proposal["experiments"][0]
+            record = self.run_experiment(exp["hypothesis"], exp["spec"], "host-strong", base_spec=chain_spec)
+            if record.get("status") == "ok" and better(record["score"], chain_score, self.task.maximize):
+                chain_spec, chain_score = record["spec"], record["score"]
+        # Перенос: признаки цепочки — на семейство лучшей модели, если оно другое (и наоборот).
+        if self.best and self._can_start_experiment():
+            best_spec = self.best["spec"]
+            for target in {best_spec["family"], first.get("spec", {}).get("family")} - {chain_spec["family"], None}:
+                spec = {**chain_spec, "family": target, "params": best_spec["params"] if target == best_spec["family"] else {}}
+                try:
+                    if json.dumps(normalize_spec(spec, self.task, None), sort_keys=True) in self.seen_specs:
+                        continue
+                except ValueError:
+                    continue
+                self.run_experiment(f"перенос признаков быстрой цепочки на {target}", spec, "host-strong")
+
     def baseline_family(self) -> str:
         """Бейзлайн — LightGBM + early stopping: быстрый «движок» для отбора признаков.
 
@@ -311,15 +350,8 @@ class Agent:
 
     def research(self) -> None:
         family = self.baseline_family()
-        self.run_experiment(f"бейзлайн: {family} с дефолтами и early stopping", {"family": family}, "host")
-        # Фаза 1: сильные ходы (ключ сущности, лаг, log-таргет, веса классов) — секунды, большой эффект.
-        # LLM дальше исследует поверх уже сильной модели, а не тратит раунды на очевидное.
-        while self._can_start_experiment():
-            proposal = self.fallback.propose(self._state(1), strong_only=True)
-            if not proposal["experiments"]:
-                break
-            exp = proposal["experiments"][0]
-            self.run_experiment(exp["hypothesis"], exp["spec"], "host-strong")
+        first = self.run_experiment(f"бейзлайн: {family} с дефолтами и early stopping", {"family": family}, "host")
+        self._strong_phase(first)
         llm_failures = 0
         rounds = 0
         while self._can_start_experiment():

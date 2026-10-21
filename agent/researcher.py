@@ -8,6 +8,7 @@ OfflineResearcher — эвристический плейбук: работае�
 from __future__ import annotations
 
 import copy
+import difflib
 import json
 import os
 import time
@@ -16,6 +17,7 @@ import numpy as np
 
 from .features import OPS_DOC, TARGET_OPS_DOC
 from .llm import LLM, extract_json
+from .models import valid_params
 from .schemas import ExperimentSpec, Proposal, ValidationError, format_validation_error, proposal_json_schema
 
 def normalize_spec(spec: dict, task, best_spec: dict | None) -> dict:
@@ -42,6 +44,11 @@ def normalize_spec(spec: dict, task, best_spec: dict | None) -> dict:
         checked = ExperimentSpec.model_validate(spec)
     except ValidationError as exc:
         raise ValueError(f"spec не прошёл проверку: {format_validation_error(exc)}") from None
+    unknown = [k for k in checked.params if k not in valid_params(checked.family)]
+    if unknown:
+        hints = {k: difflib.get_close_matches(k, sorted(valid_params(checked.family)), n=2) for k in unknown}
+        raise ValueError(f"неизвестные параметры для {checked.family}: "
+                         + "; ".join(f"{k} (возможно {', '.join(v)})" if v else k for k, v in hints.items()))
     out = {"family": checked.family, "params": checked.params,
            "features": [op.model_dump() for op in checked.features]}
     if task.task_type == "regression":

@@ -316,3 +316,48 @@ class Model:
             full[:, np.asarray(seen, int)] = proba
             return full
         return self._y_inverse(np.asarray(self.model.predict(Xp), float))
+
+
+_VALID_PARAMS: dict[str, set[str]] = {}
+
+
+def valid_params(family: str) -> set[str]:
+    """Допустимые имена гиперпараметров семейства — чтобы опечатку LLM поймать ДО обучения.
+
+    LightGBM и XGBoost принимают **kwargs и молча игнорируют неизвестное (хуже падения),
+    CatBoost падает с TypeError. Берём сигнатуры конструкторов + алиасы LightGBM.
+    """
+    if family in _VALID_PARAMS:
+        return _VALID_PARAMS[family]
+    import inspect
+
+    names: set[str] = set()
+    if family == "lightgbm":
+        import lightgbm as lgb
+
+        names |= set(inspect.signature(lgb.LGBMModel.__init__).parameters)
+        try:
+            aliases = lgb.basic._ConfigAliases._get_all_param_aliases()
+            names |= set(aliases)
+            for values in aliases.values():
+                names |= set(values)
+        except Exception:  # приватный API: если поменяется — просто без алиасов
+            pass
+    elif family == "catboost":
+        from catboost import CatBoostClassifier, CatBoostRegressor
+
+        names |= set(inspect.signature(CatBoostRegressor.__init__).parameters)
+        names |= set(inspect.signature(CatBoostClassifier.__init__).parameters)
+    elif family == "xgboost":
+        import xgboost as xgb
+
+        names |= set(xgb.XGBRegressor().get_params()) | {"eta", "lambda", "alpha", "max_leaves", "max_bin", "gamma"}
+    elif family == "extratrees":
+        from sklearn.ensemble import ExtraTreesRegressor
+
+        names |= set(inspect.signature(ExtraTreesRegressor.__init__).parameters)
+    elif family == "linear":
+        names |= {"alpha", "C"}
+    names -= {"self", "kwargs"}
+    _VALID_PARAMS[family] = names
+    return names

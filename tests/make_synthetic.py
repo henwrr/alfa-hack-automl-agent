@@ -1,7 +1,7 @@
 """Синтетические задачи нестандартного вида для проверки устойчивости агента.
 
 python tests/make_synthetic.py OUT_DIR
-Создаёт OUT_DIR/{binary_auc,multi_proba,dates_reg}/task.md + CSV.
+Создаёт OUT_DIR/{binary_auc,multi_proba,dates_reg,text_cls,highcard_rmsle,big_mape}/task.md + CSV.
 """
 
 import sys
@@ -59,6 +59,37 @@ def main(out: Path):
     df.insert(0, "id", np.arange(n + m))
     write(out / "dates_reg", "# Продажи\nРегрессия: предсказать `sales`. Метрика — MAE.\n",
           df.iloc[:n], df.iloc[n:].drop(columns="sales"), pd.DataFrame({"id": df.id.iloc[n:], "sales": 0.0}))
+
+    # 4) текстовая колонка: таргет зависит от слов в отзыве, accuracy
+    words = ["быстро", "удобно", "дорого", "медленно", "отлично", "плохо", "нормально", "доставка", "курьер", "товар"]
+    good, bad = {"быстро", "удобно", "отлично"}, {"дорого", "медленно", "плохо"}
+    texts = [" ".join(rng.choice(words, size=rng.integers(3, 15))) for _ in range(n + m)]
+    score = np.array([sum(w in good for w in t.split()) - sum(w in bad for w in t.split()) for t in texts])
+    df = frame(n + m, rng).drop(columns="event_date")
+    df.insert(0, "review_id", np.arange(n + m))
+    df["review_text"] = texts
+    df["liked"] = np.where(score + rng.normal(0, 1, n + m) > 0, "yes", "no")
+    write(out / "text_cls", "# Отзывы\nКлассификация: понравился ли заказ (`liked`, yes/no) по тексту отзыва. Метрика — accuracy.\n",
+          df.iloc[:n], df.iloc[n:].drop(columns="liked"), pd.DataFrame({"review_id": df.review_id.iloc[n:], "liked": "yes"}))
+    # 5) категория на ~50 тыс. значений + RMSLE, таргет положительный с хвостом
+    nn, mm = 120000, 30000
+    users = rng.integers(0, 50000, size=nn + mm)
+    user_effect = rng.lognormal(0, 1, 50000)
+    df = pd.DataFrame({"user_id": [f"u{u}" for u in users], "x1": rng.normal(size=nn + mm),
+                       "x2": rng.choice(["a", "b", "c"], size=nn + mm)})
+    df["spend"] = user_effect[users] * np.exp(0.3 * df.x1) * rng.lognormal(0, 0.3, nn + mm)
+    df.insert(0, "id", np.arange(nn + mm))
+    write(out / "highcard_rmsle", "# Траты\nРегрессия: предсказать `spend`. Метрика — RMSLE.\n",
+          df.iloc[:nn], df.iloc[nn:].drop(columns="spend"), pd.DataFrame({"id": df.id.iloc[nn:], "spend": 0.0}))
+    # 6) большой датасет: 500 тыс. строк train, MAPE
+    nb, mb = 500000, 100000
+    X = rng.normal(size=(nb + mb, 15)).astype(np.float32)
+    df = pd.DataFrame(X, columns=[f"f{i}" for i in range(15)])
+    df["region"] = rng.choice([f"r{i}" for i in range(30)], size=nb + mb)
+    df["price"] = 100 + 10 * df.f0 + 5 * df.f1 ** 2 + df.region.str[1:].astype(int) + rng.normal(0, 3, nb + mb)
+    df.insert(0, "id", np.arange(nb + mb))
+    write(out / "big_mape", "# Цена\nРегрессия: предсказать `price`. Метрика — MAPE.\n",
+          df.iloc[:nb], df.iloc[nb:].drop(columns="price"), pd.DataFrame({"id": df.id.iloc[nb:], "price": 0.0}))
 
 
 if __name__ == "__main__":

@@ -139,6 +139,37 @@ def _expand_dates(train: pd.DataFrame, test: pd.DataFrame, skip: set) -> list[st
     return found
 
 
+def _expand_text(train: pd.DataFrame, test: pd.DataFrame, skip: set, top_words: int = 50) -> list[str]:
+    """Свободный текст -> длина, число слов и частоты самых частых слов.
+
+    Без этого текст попадает в модель категорией, где почти каждое значение уникально (accuracy ~ монетка).
+    Признак текста: строки, в среднем ≥3 слов, и большинство значений уникальны.
+    """
+    found = []
+    for c in list(train.columns):
+        if c in skip or c not in test.columns or train[c].dtype != object:
+            continue
+        sample = train[c].dropna().astype(str).head(2000)
+        if sample.empty or sample.str.split().str.len().mean() < 3 or sample.nunique() < 0.5 * len(sample):
+            continue
+        found.append(c)
+        both = pd.concat([train[c], test[c]], ignore_index=True).fillna("").astype(str).str.lower()
+        tokens = both.str.findall(r"\w+")
+        counts = pd.Series([t for row in tokens for t in set(row)]).value_counts()
+        vocab = [w for w, k in counts.items() if k >= max(5, 0.005 * len(both))][:top_words]
+        feats = {f"{c}__len": both.str.len(), f"{c}__words": tokens.str.len()}
+        for i, w in enumerate(vocab):
+            safe = re.sub(r"\W", "_", w)[:20] or f"t{i}"
+            feats[f"{c}__w_{safe}"] = tokens.apply(lambda row, w=w: row.count(w))
+        block = pd.DataFrame(feats)
+        n = len(train)
+        for frame, part in ((train, block.iloc[:n]), (test, block.iloc[n:])):
+            for name in block.columns:
+                frame[name] = part[name].to_numpy()
+            frame.drop(columns=[c], inplace=True)
+    return found
+
+
 def discover(task_path: Path) -> tuple[Task, pd.DataFrame, pd.DataFrame]:
     task_path = Path(task_path).resolve()
     task_dir = task_path.parent
@@ -198,6 +229,7 @@ def discover(task_path: Path) -> tuple[Task, pd.DataFrame, pd.DataFrame]:
             output_mode = "proba"
 
     _expand_dates(train, test, skip={id_col, target})
+    _expand_text(train, test, skip={id_col, target})
     feature_cols = [c for c in test.columns if c != id_col and c in train.columns]
     cat_cols = []
     for c in feature_cols:
