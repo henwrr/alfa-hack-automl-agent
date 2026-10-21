@@ -169,3 +169,28 @@ def test_usage_above_budget_prevents_dispatch_of_the_returned_tool(tmp_path, mon
     report = run(parse_config(["--cv-folds", "1", "--family-trials", "3", str(task), "--run-dir", str(tmp_path / "run"), "--time-budget", "90", "--max-trials", "2", "--max-tokens", "30000", "--n-jobs", "1"]))
     assert report["stop_reason"] == "token_budget"
     assert not any(t["hypothesis"] == "must not execute" for t in report["trials"])
+
+
+def test_finalize_only_refreshes_completed_run_without_research(tmp_path, monkeypatch):
+    from automl_agent.agent import ResearchRun
+
+    task = make_task(tmp_path / 'dataset')
+    directory = tmp_path / 'run'
+    args = [str(task), '--offline', '--run-dir', str(directory), '--time-budget', '90',
+            '--cv-folds', '1', '--family-trials', '1', '--n-jobs', '1']
+    first = run(parse_config(args))
+    before = (directory / 'events.jsonl').read_bytes()
+    def forbidden(*args, **kwargs):
+        raise AssertionError('finalize-only must not run experiments or contact LLM')
+    monkeypatch.setattr(ResearchRun, '_family_comparison', forbidden)
+    monkeypatch.setattr(ResearchRun, 'research', forbidden)
+    config = parse_config([*args, '--resume'])
+    config.offline = False
+    config.finalize_only = True
+    refreshed = run(config)
+    assert refreshed['final_fit']['status'] == 'ok'
+    assert refreshed['final_fit']['artifact_dir'] != first['final_fit']['artifact_dir']
+    assert refreshed['stop_reason'] == 'finalize_only'
+    assert refreshed['llm_calls'] == first['llm_calls']
+    assert refreshed['trials'] == first['trials']
+    assert (directory / 'events.jsonl').read_bytes().startswith(before)

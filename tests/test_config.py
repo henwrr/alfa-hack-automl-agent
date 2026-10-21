@@ -49,3 +49,11 @@ def test_explicit_limits_still_apply():
 def test_invalid_configuration_is_rejected(args):
     with pytest.raises((ValueError, SystemExit)):
         parse_config(["--offline", *args])
+
+
+def test_finalize_only_requires_resume_and_needs_no_llm(monkeypatch, tmp_path):
+    monkeypatch.delenv('OPENAI_MODEL', raising=False)
+    with pytest.raises(SystemExit):
+        parse_config(['--finalize-only'])
+    config = parse_config(['--resume', '--finalize-only', '--run-dir', str(tmp_path)])
+    assert config.finalize_only and config.resume

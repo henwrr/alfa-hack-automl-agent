@@ -38,6 +38,7 @@ class Config:
     time_column: str | None = None
     run_dir: Path | None = None
     resume: bool = False
+    finalize_only: bool = False
     offline: bool = False
     target: str | None = None
     task_type: str | None = None
@@ -87,6 +88,7 @@ def parse_config(argv=None) -> Config:
     parser.add_argument("--time-column")
     parser.add_argument("--run-dir", type=Path)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--finalize-only", action="store_true", help="With --resume: reuse saved trials and train final model without research or LLM calls")
     parser.add_argument("--offline", action="store_true", help="Explicit deterministic baseline smoke, without LLM")
     parser.add_argument("--target")
     parser.add_argument("--task-type", choices=["regression", "classification"])
@@ -101,7 +103,7 @@ def parse_config(argv=None) -> Config:
     url = urlsplit(base_url)
     if url.scheme not in {"http", "https"} or not url.netloc or url.username or url.password or url.query or url.fragment:
         parser.error("OPENAI_BASE_URL must be an HTTP(S) URL without embedded credentials or query")
-    if not args.offline and not model:
+    if not args.offline and not args.finalize_only and not model:
         parser.error("Set OPENAI_MODEL, or use --offline for a deterministic smoke run")
     for name in ("time_budget", "trial_timeout", "llm_timeout"):
         value = getattr(args, name)
@@ -122,6 +124,8 @@ def parse_config(argv=None) -> Config:
         parser.error("--validation-fraction must be between 0.05 and 0.5")
     if args.resume and args.run_dir is None:
         parser.error("--resume requires --run-dir")
+    if args.finalize_only and not args.resume:
+        parser.error("--finalize-only requires --resume")
     try:
         extra_body = json.loads(os.getenv("AUTOML_EXTRA_BODY", "{}"))
         if not isinstance(extra_body, dict):

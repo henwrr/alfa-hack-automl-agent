@@ -774,7 +774,7 @@ class ResearchRun:
         from .modeling import baseline_code
         from .strategy import baseline_decision, plan_research
 
-        if self.config.resume and not self.state.get("active") and (self.directory / "report.json").exists():
+        if self.config.resume and not self.config.finalize_only and not self.state.get("active") and (self.directory / "report.json").exists():
             validate_submission(self.task, self.output)
             # Older completed runs may predate snapshot redaction. Preserve
             # no-op resume semantics while cleaning their public reports too.
@@ -836,9 +836,12 @@ class ResearchRun:
             self._restore_best_submission()
         self.checkpoint()
         try:
-            if self.budget.research_remaining() > 0:
+            if self.config.finalize_only:
+                self.stop_reason = "finalize_only"
+                self.journal.append("research_stopped", reason=self.stop_reason, total_tokens=self.tokens_used, elapsed_seconds=round(self.budget.elapsed(), 3))
+            if not self.config.finalize_only and self.budget.research_remaining() > 0:
                 self._family_comparison(strategy)
-            if not self.config.offline:
+            if not self.config.offline and not self.config.finalize_only:
                 self.research()
             best = select_best(self.results, self.task.maximize)
             self.postprocessing_plan = {'accepted':False, 'reason':'no_time_or_oof'}
