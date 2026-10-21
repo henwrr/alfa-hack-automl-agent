@@ -276,3 +276,13 @@ def test_generated_code_contract_accepts_model_pipeline():
 def test_generated_code_obvious_unsafe_or_invalid_operations_rejected(code):
     with pytest.raises(ValueError):
         validate_candidate_code(code)
+
+
+@pytest.mark.parametrize('source', [
+    "import pandas as pd\ndef build_model(context):\n return pd.read_table('/tmp/validation_target.csv', sep=',')",
+    "from pandas import read_table as reader\ndef build_model(context):\n return reader('/tmp/validation_target.csv')",
+    "def build_model(context):\n return __file__.rsplit('/', 2)[0]",
+])
+def test_candidate_cannot_use_alternative_file_readers_or_worker_file_location(source):
+    with pytest.raises(ValueError):
+        validate_candidate_code(source)

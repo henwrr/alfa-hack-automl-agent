@@ -320,7 +320,7 @@ def validate_candidate_code(code):
         raise ValueError("Define build_model(context) returning an unfitted estimator or Pipeline")
     allowed = {"sklearn", "catboost", "lightgbm", "xgboost", "numpy", "pandas", "scipy", "math", "functools", "collections", "typing", "itertools", "operator", "statistics", "warnings", "re"}
     forbidden_calls = {"open", "eval", "exec", "compile", "__import__", "input", "breakpoint", "globals", "locals", "getattr", "setattr", "delattr", "vars", "exit", "quit"}
-    forbidden_attrs = {"read_csv", "read_parquet", "read_pickle", "to_csv", "to_pickle", "load", "loadtxt", "fromfile", "tofile", "dump", "save", "savez", "system", "popen", "connect", "urlopen"}
+    forbidden_attrs = {"read_csv", "read_table", "read_fwf", "read_parquet", "read_pickle", "read_json", "read_excel", "read_html", "read_xml", "read_feather", "read_hdf", "read_orc", "read_sas", "read_spss", "read_stata", "read_sql", "read_sql_query", "read_sql_table", "to_csv", "to_pickle", "load", "loadtxt", "genfromtxt", "fromregex", "fromfile", "tofile", "memmap", "loadmat", "dump", "save", "savez", "system", "popen", "connect", "urlopen"}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             imports = [item.name.split(".")[0] for item in node.names]
@@ -328,9 +328,11 @@ def validate_candidate_code(code):
                 raise ValueError("Only modelling-library imports are allowed in candidate code")
         if isinstance(node, ast.ImportFrom) and (node.level or not node.module or node.module.split(".")[0] not in allowed):
             raise ValueError("Only absolute modelling-library imports are allowed")
+        if isinstance(node, ast.ImportFrom) and any(item.name in forbidden_attrs for item in node.names):
+            raise ValueError("Candidate code cannot import file or network operations")
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in forbidden_calls:
             raise ValueError(f"Candidate code cannot call {node.func.id}")
         if isinstance(node, ast.Attribute) and ((node.attr.startswith("__") and node.attr != "__init__") or node.attr in forbidden_attrs):
             raise ValueError(f"Candidate code cannot access {node.attr}")
-        if isinstance(node, ast.Name) and node.id in {"__builtins__", "__loader__", "__spec__"}:
+        if isinstance(node, ast.Name) and node.id in {"__builtins__", "__loader__", "__spec__", "__file__", "__cached__"}:
             raise ValueError(f"Candidate code cannot access {node.id}")

@@ -1,0 +1,9 @@
+# Дополнительное review интеграции
+
+Независимый GPT-6 Luna xhigh проверял worktree research-review на commit4be6684. Он подтвердил конкретный обход AST I/O guard в расширенном code mode: `pd.read_table(...)`, импорт того же reader через alias и доступ к `__file__` принимались валидатором. Это позволяло коду обращаться к локальным host-файлам. Прямое чтение реальных labels и публичное обучение для воспроизведения не выполнялись. Root добавил три поведенческих RED проверки, расширил блокировку I/O и запретил worker file globals. Green tools/recipes:77 passed. AST guard остаётся проверкой частых ошибок, а не полноценным OS sandbox.
+
+Отдельные CV и OOF reviews сохранены в CV_REVIEW.md и POSTPROCESSING_REVIEW.md; замечания по fingerprint/OOF axes, probability validation, custom classifier comparator и final override закрыты тестами.
+
+Root дополнительно воспроизвёл серьёзную задержку postprocessing регрессии: `_ordered_classes([], continuous_y)` выполнял квадратичный поиск уникальных числовых targets. Исправление исключает class discovery для регрессии. На тех же51,191 OOF строках публичного run время снизилось с447.152s до0.213s при неизменных scores. Postprocessing теперь запускается отдельным supervised процессом, максимум60s и только за счёт времени сверх измеренного резерва одиночного refit и записи. Timeout оставляет исходного победителя.
+
+Recipe context review root выявил потерю confusion matrix и несовпадение whitelist с actual drift schema. Исправлено в f573007 и дополнительно root: до10 class rows и10×10 matrix сохраняются даже при сильном сжатии, nested without_temporal AUC остаётся; непрерывные target stats и точная лучшая recipe не заменяются строкой. При слишком большом обязательном payload выдаётся явная ошибка вместо превышения context budget. Полный canonical journal не сжимается.
