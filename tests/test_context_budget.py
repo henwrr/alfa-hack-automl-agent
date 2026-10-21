@@ -164,6 +164,101 @@ def test_recipe_catalog_prefers_best_measured_base_and_prompt_runs_to_reserve():
     assert "Stop at the reserved deadline or after measured convergence" not in messages[0]["content"]
 
 
+def test_recipe_diagnostics_keep_confusion_axis_partial_flag_and_nested_auc():
+    task, profile, results = _task(10, 100), _profile(10), _results(2)
+    labels = [f"class_{index}" for index in range(10)]
+    results[0].diagnostics.update({
+        "partial": True,
+        "total_classes": 10,
+        "per_class": [{"label": label, "precision": 0.5, "recall": 0.4, "f1": 0.44, "support": 100}
+                      for label in labels],
+        "confusion_matrix": {"labels": labels, "matrix": [[int(i == j) for j in range(10)] for i in range(10)],
+                             "total_classes": 10, "partial": True, "selection": "lowest_f1_first"},
+    })
+    profile["dataset_diagnostics"]["adversarial_cv"]["without_temporal"] = {
+        "status": "ok", "metric": "roc_auc", "roc_auc_mean": 1.0, "roc_auc_std": 0.0, "folds": 3,
+        "private_payload": "discard me",
+    }
+
+    messages = build_messages(task, profile, results, results[0],
+                              {"n_jobs": 2, "experiment_mode": "recipe"}, compact=True)
+    content = json.loads(messages[1]["content"])
+    diagnostics = content["best_experiment"]["diagnostics"]
+    matrix = diagnostics["confusion_matrix"]
+
+    assert matrix["labels"] == labels
+    assert len(matrix["matrix"]) == 10 and all(len(row) == 10 for row in matrix["matrix"])
+    assert [row["label"] for row in diagnostics["per_class"]] == labels
+    assert matrix["partial"] is True and diagnostics["partial"] is True
+    assert content["data_profile"]["dataset_diagnostics"]["adversarial_cv"]["without_temporal"]["roc_auc_mean"] == 1.0
+    assert "private_payload" not in json.dumps(content)
+
+
+def test_recipe_profile_compacts_real_numeric_and_categorical_shift_fields():
+    task, profile, results = _task(10, 100), _profile(10), _results(2)
+    profile["dataset_diagnostics"]["features"] = {
+        "amount": {"kind": "numeric", "train_missing_rate": 0.1, "test_missing_rate": 0.3,
+                   "train_mean": 10.0, "test_mean": 20.0, "train_min": 0.0, "test_max": 99.0,
+                   "mean_difference": 10.0, "raw_rows": ["drop"] * 200},
+        "region": {"kind": "categorical", "train_missing_rate": 0.0, "test_missing_rate": 0.1,
+                   "category_shift": {"train_only_count": 4, "test_only_count": 7,
+                                      "test_only_top": [{"value": "new-region", "count": 12}] * 20}},
+    }
+
+    messages = build_messages(task, profile, results, results[0],
+                              {"n_jobs": 2, "experiment_mode": "recipe"}, compact=True)
+    content = json.loads(messages[1]["content"])
+    shifts = content["data_profile"]["dataset_diagnostics"]["feature_shift"]
+
+    assert shifts["amount"]["train_missing_rate"] == 0.1
+    assert shifts["amount"]["test_mean"] == 20.0
+    assert shifts["region"]["category_shift"]["test_only_count"] == 7
+    assert len(json.dumps(shifts)) < 1000
+
+
+def test_recipe_payload_hard_bound_with_thousand_trials_keeps_valid_catalog_and_best():
+    task, profile = _task(200, 5000), _profile(200)
+    profile["family_comparison"]["trials"] = [
+        {"family": "CatBoost", "trial_id": f"base_{index:04d}", "status": "ok", "metric": 0.5,
+         "seconds": 20, "model_details": {"parameters": {"trace": "x" * 100}}}
+        for index in range(1000)
+    ]
+    results = []
+    for index in range(1000):
+        best = index == 0
+        latest = index == 999
+        results.append(ExperimentResult(
+            trial_id=f"trial_{index + 1:04d}", status="invalid_code" if latest else "ok",
+            artifact_dir="/missing/artifact", code_hash=f"hash-{index}",
+            hypothesis=f"hypothesis {index}: " + "evidence " * 100,
+            metric=0.91 if best else 0.5, error=("Latest failure marker " + "traceback " * 1000) if latest else None,
+            recipe=({"family": "CatBoost", "parameters": {"iterations": 1234, "learning_rate": 0.48828},
+                     "preprocessing": {"add_missing_indicators": False}} if best else None),
+            model_details=({"class": "catboost.CatBoostClassifier", "parameters": {"iterations": 1234, "learning_rate": 0.48828}}
+                           if best else {}),
+            diagnostics=(_diagnostics("trial_0001", 9) if best else {}),
+        ))
+    best = results[0]
+    limit = 12_000
+
+    messages = build_messages(task, profile, results, best,
+                              {"n_jobs": 4, "parallel_trials": 2, "experiment_mode": "recipe"},
+                              context_chars=24_000, compact=True)
+    content = json.loads(messages[1]["content"])
+
+    assert len(messages[1]["content"]) <= limit
+    assert content["best_experiment"]["trial_id"] == "trial_0001"
+    assert content["best_experiment"]["recipe"]["parameters"]["learning_rate"] == 0.48828
+    assert content["best_experiment"]["model_details"]["parameters"]["learning_rate"] == 0.48828
+    assert content["data_profile"]["target"]["class_counts"] == {"common": 48000, "rare": 2000}
+    assert content["data_profile"]["validation_plan"]["strategy"] == "forward_group"
+    assert "Latest failure marker" in content["latest_experiment"]["error"]
+    assert len(content["experiments"]) <= 13
+    assert content["model_catalog"]["task_type"] == "classification"
+    assert "families" in content["model_catalog"]
+    assert "family_comparison" not in content, "overflow fallback should shed secondary comparisons, not core facts"
+
+
 def test_code_mode_keeps_its_existing_code_context_contract(tmp_path):
     task, profile, results = _task(2, 10), _profile(2), _results(2, latest_status="ok")
     code_path = Path(results[0].artifact_dir)

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import copy
 import json
+import math
 from pathlib import Path
 
 
@@ -38,8 +40,15 @@ def _profile_facts(profile):
     result = {key: profile[key] for key in keys if key in profile}
     drift = profile.get('dataset_diagnostics', {})
     if drift:
-        result['dataset_diagnostics'] = {k:drift[k] for k in ('temporal_candidates','adversarial_cv') if k in drift}
-        result['dataset_diagnostics']['feature_shift'] = dict(list(drift.get('features', {}).items())[:8])
+        result['dataset_diagnostics'] = {k: drift[k] for k in ('temporal_candidates', 'adversarial_cv') if k in drift}
+        raw_shift = drift.get('feature_shift', drift.get('features', {}))
+        if isinstance(raw_shift, dict):
+            result['dataset_diagnostics']['feature_shift'] = dict(list(raw_shift.items())[:8])
+        elif isinstance(raw_shift, list):
+            result['dataset_diagnostics']['feature_shift'] = raw_shift[:8]
+        for key in ('feature_shift_total', 'feature_shift_partial'):
+            if key in drift:
+                result['dataset_diagnostics'][key] = drift[key]
     features = profile.get("features", {})
     important = sorted(features, key=lambda name: (features[name].get("missing_fraction", 0), features[name].get("unique", 0)), reverse=True)
     result["feature_summary"] = [{"name": name, **{key: features[name][key] for key in ("dtype", "missing_fraction", "unique", "non_finite", "numeric") if key in features[name]}} for name in important[:12]]
@@ -93,6 +102,14 @@ def _clip_text(value, limit):
     return value[:head] + "\n[… контекст сокращён …]\n" + value[-tail:]
 
 
+def _finite_number(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
 def _compact_recipe_diagnostics(diagnostics, level):
     """Keep decision-relevant diagnostics while dropping fold-level noise."""
     diagnostics = diagnostics or {}
@@ -113,15 +130,38 @@ def _compact_recipe_diagnostics(diagnostics, level):
             {key: row[key] for key in ("label", "precision", "recall", "f1", "support", "predicted") if key in row}
             for row in rows[: max(4, 20 - level * 3)] if isinstance(row, dict)
         ]
-        for key in ("total_classes", "classes_partial"):
+        for key in ("total_classes", "partial"):
             if key in diagnostics:
                 keep[key] = diagnostics[key]
+    for key in ("total_segments", "segments_partial"):
+        if key in diagnostics:
+            keep[key] = diagnostics[key]
+    confusion = diagnostics.get("confusion_matrix")
+    if isinstance(confusion, dict):
+        labels = confusion.get("labels")
+        matrix = confusion.get("matrix")
+        if isinstance(labels, list) and isinstance(matrix, list):
+            size = min(10, len(labels), len(matrix))
+            rows = matrix[:size]
+            if all(isinstance(row, list) and len(row) >= size for row in rows):
+                keep["confusion_matrix"] = {
+                    "labels": labels[:size],
+                    "matrix": [row[:size] for row in rows],
+                }
+                for key in ("total_classes", "partial", "selection"):
+                    if key in confusion:
+                        keep["confusion_matrix"][key] = confusion[key]
+                if len(labels) > size or len(matrix) > size:
+                    keep["confusion_matrix"]["partial"] = True
+    if isinstance(diagnostics.get("partial"), bool):
+        keep["partial"] = diagnostics["partial"]
     if "segments" in diagnostics:
         keep["segments"] = (diagnostics.get("segments") or [])[:max(2, 8 - level)]
     importance = diagnostics.get("feature_importance")
     if isinstance(importance, dict):
         keep["feature_importance"] = {
-            key: importance[key] for key in ("method", "interpretation", "status", "feature_count") if key in importance
+            key: importance[key] for key in
+            ("method", "interpretation", "status", "feature_count", "total_items", "partial") if key in importance
         }
         items = importance.get("items") or []
         keep["feature_importance"]["items"] = items[:max(3, 10 - level * 2)]
@@ -173,6 +213,29 @@ def _recipe_catalog_context(task_type, profile, results, maximize=True):
     return catalog
 
 
+def _budget_catalog(catalog, keep_families, drop_defaults):
+    compact = copy.deepcopy(catalog)
+    if keep_families:
+        for section in ("families", "boosting_families"):
+            families = compact.get(section, {})
+            for family in list(families):
+                if family not in keep_families:
+                    families.pop(family, None)
+    for section in ("families", "boosting_families"):
+        for family in compact.get(section, {}).values():
+            for schema in family.get("parameters", {}).values():
+                if drop_defaults:
+                    schema.pop("default", None)
+            for schema in family.get("preprocessing", {}).values():
+                if drop_defaults:
+                    schema.pop("default", None)
+    fit_options = compact.get("fit_options", {})
+    for schema in fit_options.get("options", {}).values():
+        if drop_defaults:
+            schema.pop("default", None)
+    return compact
+
+
 def _recipe_profile_context(profile, level):
     facts = _profile_facts(profile)
     facts.pop("feature_summary", None)
@@ -204,18 +267,60 @@ def _recipe_profile_context(profile, level):
         diagnostics["temporal_candidates"] = temporal[:max(1, 4 - level)] if isinstance(temporal, list) else temporal
         adversarial = diagnostics.get("adversarial_cv")
         if isinstance(adversarial, dict):
-            diagnostics["adversarial_cv"] = {
-                key: adversarial[key] for key in
-                ("status", "metric", "roc_auc_mean", "roc_auc_std", "mean", "std", "fold_roc_auc", "rows", "feature_count")
-                if key in adversarial
-            }
+            def small_auc(value):
+                if not isinstance(value, dict):
+                    return None
+                fields = ("status", "metric", "reason", "roc_auc_mean", "roc_auc_std", "folds", "seconds", "elapsed_seconds")
+                return {key: value[key] for key in fields if key in value}
+
+            compact_auc = small_auc(adversarial)
+            without_temporal = small_auc(adversarial.get("without_temporal"))
+            if isinstance(compact_auc, dict) and isinstance(without_temporal, dict):
+                compact_auc["without_temporal"] = without_temporal
+            diagnostics["adversarial_cv"] = compact_auc or {}
         shift = diagnostics.get("feature_shift", {})
-        if isinstance(shift, dict):
+        shift_rows = list(shift.items()) if isinstance(shift, dict) else [
+            (row.get("feature", f"feature_{index}"), row)
+            for index, row in enumerate(shift) if isinstance(row, dict)
+        ] if isinstance(shift, list) else []
+        compact_shift = []
+        for name, value in shift_rows:
+            if not isinstance(value, dict):
+                continue
+            item = {}
+            for key in ("kind", "train_missing_rate", "test_missing_rate", "train_mean", "test_mean",
+                        "train_std", "test_std", "train_min", "train_max", "test_min", "test_max",
+                        "mean_difference", "train_unique_count", "test_unique_count", "train_only_count", "test_only_count"):
+                if key in value:
+                    item[key] = value[key]
+            category_shift = value.get("category_shift")
+            if isinstance(category_shift, dict):
+                compact_category = {key: category_shift[key] for key in ("train_only_count", "test_only_count") if key in category_shift}
+                for key in ("train_only_top", "test_only_top"):
+                    rows = category_shift.get(key)
+                    if isinstance(rows, list):
+                        compact_category[key] = [
+                            {k: (_clip_text(row[k], 80) if isinstance(row.get(k), str) else row[k])
+                             for k in ("value", "count") if k in row}
+                            for row in rows[:2] if isinstance(row, dict)
+                        ]
+                if compact_category:
+                    item["category_shift"] = compact_category
+            if item:
+                score = max(
+                    abs(float(value.get("mean_difference", 0) or 0)),
+                    abs(float(value.get("train_missing_rate", 0) or 0) - float(value.get("test_missing_rate", 0) or 0)),
+                    float(item.get("train_only_count", 0) or 0), float(item.get("test_only_count", 0) or 0),
+                    float((item.get("category_shift") or {}).get("train_only_count", 0) or 0),
+                    float((item.get("category_shift") or {}).get("test_only_count", 0) or 0),
+                )
+                compact_shift.append((score, str(name), item))
+        compact_shift.sort(key=lambda row: (-row[0], row[1]))
+        if compact_shift:
             shift_limit = max(2, 8 - level)
-            diagnostics["feature_shift"] = {
-                name: {key: value[key] for key in ("shift", "missing_delta", "mean_shift", "std_shift") if key in value}
-                for name, value in list(shift.items())[:shift_limit] if isinstance(value, dict)
-            }
+            diagnostics["feature_shift"] = {name: item for _, name, item in compact_shift[:shift_limit]}
+        else:
+            diagnostics["feature_shift"] = {}
     return facts
 
 
@@ -238,8 +343,11 @@ def _recipe_task_context(task, runtime_context, level):
 
 def _build_recipe_messages(task, profile, results, best, runtime_context, feedback, context_chars, compact):
     """Construct a bounded, recipe-only prompt without changing the code-mode path."""
-    limit = max(5000, context_chars // 2) if compact else max(5000, context_chars)
+    limit = max(12000, context_chars // 2) if compact else max(12000, context_chars)
     latest = results[-1] if results else None
+    ledger_results = list(results[-12:])
+    if best is not None and not any(result.trial_id == best.trial_id for result in ledger_results):
+        ledger_results.insert(0, best)
     description = task.description or ""
     catalog = _recipe_catalog_context(task.task_type, profile, results, task.maximize)
     constraints = (
@@ -261,10 +369,10 @@ def _build_recipe_messages(task, profile, results, best, runtime_context, feedba
         feedback_limit = (5000, 3500, 2200, 1400, 800, 400)[min(level, 5)] if compact else 5000
         hypothesis_limit = (450, 350, 260, 180, 100, 28)[min(level, 5)]
         experiments = []
-        for result in results:
+        for result in ledger_results:
             row = {"trial_id": result.trial_id, "status": result.status,
                    "hypothesis": _clip_text(result.hypothesis, hypothesis_limit), "metric": result.metric}
-            if result is best:
+            if best is not None and result.trial_id == best.trial_id:
                 row["recipe"] = result.recipe
             experiments.append(row)
 
@@ -338,47 +446,79 @@ def _build_recipe_messages(task, profile, results, best, runtime_context, feedba
             break
 
     if len(encoded) > limit:
-        # Last-resort payload retains the facts that change a recipe decision.
-        # Most user-provided text is summarized, while exact recipe and measured
-        # parameter values, class counts, metric, validation design and latest error stay.
+        keep_families = set()
+        if best and isinstance(best.recipe, dict) and best.recipe.get("family"):
+            keep_families.add(best.recipe["family"])
+        keep_families.update(row.get("family") for row in catalog.get("measured_bases", []) if row.get("family"))
+        recent = content["experiments"][-8:]
+        if best is not None and not any(row.get("trial_id") == best.trial_id for row in recent):
+            best_history = next((row for row in content["experiments"] if row.get("trial_id") == best.trial_id), None)
+            if best_history:
+                recent = [best_history, *recent]
         core = {
             "task": {key: value for key, value in content["task"].items()
                      if key in {"task_type", "metric", "target", "classes", "seed", "n_jobs", "feature_count", "categorical_count"}},
             "task_constraints": content["task_constraints"],
-            "data_profile": {
-                key: content["data_profile"][key] for key in
-                ("task_type", "metric", "target", "validation_plan", "available_packages", "dataset_diagnostics")
-                if key in content["data_profile"]
-            },
-            "model_catalog": content["model_catalog"],
+            "data_profile": content["data_profile"],
+            "model_catalog": _budget_catalog(catalog, keep_families, drop_defaults=False),
             "best_experiment": content["best_experiment"],
             "latest_experiment": content["latest_experiment"],
-            "experiments": [{key: row.get(key) for key in ("trial_id", "status", "metric", "recipe") if key in row}
-                            for row in content["experiments"]],
+            "experiments": recent,
             "family_comparison": content["family_comparison"],
             "last_failed_code": "",
-            "runtime": runtime_context,
+            "runtime": {key: runtime_context[key] for key in ("n_jobs", "parallel_trials", "experiment_mode", "remaining_seconds") if key in runtime_context},
         }
-        encoded = json.dumps(core, ensure_ascii=False, allow_nan=False, default=str)
+
+        def encode_core():
+            return json.dumps(core, ensure_ascii=False, allow_nan=False, default=str)
+
+        encoded = encode_core()
         if len(encoded) > limit:
-            # Oversized rare-label/diagnostic payloads get a bounded record with exact
-            # target counts and tested parameters. Keep a useful error excerpt.
-            best_row = content["best_experiment"] or {}
-            latest_row = content["latest_experiment"] or {}
-            compact_best = {key: best_row.get(key) for key in ("trial_id", "status", "metric", "recipe", "model_details") if key in best_row}
-            compact_latest = {key: latest_row.get(key) for key in ("trial_id", "status", "metric", "same_as_best", "error") if key in latest_row}
-            core["best_experiment"] = compact_best
-            core["latest_experiment"] = compact_latest
-            core["data_profile"].pop("validation_plan", None)
-            core["model_catalog"] = {"task_type": task.task_type}
-            encoded = json.dumps(core, ensure_ascii=False, allow_nan=False, default=str)
+            # Trim optional context first. Keep a valid catalog for measured families,
+            # the complete validation plan, exact best recipe/parameters and last error.
+            core.pop("family_comparison", None)
+            core["model_catalog"] = _budget_catalog(catalog, keep_families, drop_defaults=True)
+            core["model_catalog"].pop("measured_bases", None)
+            core["experiments"] = [
+                {key: row[key] for key in ("trial_id", "status", "metric") if key in row}
+                for row in recent
+            ]
+            core["latest_experiment"] = {
+                key: content["latest_experiment"][key]
+                for key in ("trial_id", "status", "metric", "same_as_best", "error", "diagnostics")
+                if key in content["latest_experiment"]
+            }
+            if "error" in core["latest_experiment"]:
+                core["latest_experiment"]["error"] = _clip_text(core["latest_experiment"]["error"], 700)
+            encoded = encode_core()
         if len(encoded) > limit:
-            # The core recipe/diagnostics are normally small; this guard bounds pathological
-            # descriptions and errors while preserving task, latest failure and model params.
-            core["best_experiment"] = _clip_text(json.dumps(core["best_experiment"], ensure_ascii=False, default=str), max(300, limit // 5))
-            core["latest_experiment"] = _clip_text(json.dumps(core["latest_experiment"], ensure_ascii=False, default=str), max(300, limit // 5))
-            core["model_catalog"] = {"task_type": task.task_type}
-            encoded = json.dumps(core, ensure_ascii=False, allow_nan=False, default=str)
+            # Keep a small, reviewable history plus best and latest while retaining
+            # the native catalog schema and validation plan rather than serializing
+            # model data as strings or silently exceeding the selected budget.
+            core["experiments"] = [
+                {key: row[key] for key in ("trial_id", "status", "metric") if key in row}
+                for row in recent[-4:]
+            ]
+            core.pop("family_comparison", None)
+            core["model_catalog"] = _budget_catalog(catalog, keep_families, drop_defaults=True)
+            core["model_catalog"].pop("measured_bases", None)
+            core["data_profile"]["dataset_diagnostics"] = {
+                key: value for key, value in core["data_profile"].get("dataset_diagnostics", {}).items()
+                if key == "adversarial_cv"
+            }
+            core["task"]["classes"] = core["task"].get("classes", [])[:10]
+            core["latest_experiment"] = {
+                key: core["latest_experiment"][key]
+                for key in ("trial_id", "status", "metric", "same_as_best", "error")
+                if key in core["latest_experiment"]
+            }
+            encoded = encode_core()
+        if len(encoded) > limit:
+            # Pathological profile/class-count/recipe payloads must fail explicitly;
+            # never send a truncated recipe or malformed/empty model catalog.
+            raise ValueError(
+                f"Recipe prompt essentials require {len(encoded)} characters, above the {limit}-character budget."
+            )
 
     system_prompt = RECIPE_SYSTEM_PROMPT
     if task.task_type == "regression":
