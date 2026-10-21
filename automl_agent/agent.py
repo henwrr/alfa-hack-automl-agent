@@ -697,7 +697,7 @@ class ResearchRun:
                     self.feedback = "Context overflow: the host reduced auxiliary context. Return one compact tool call."
                     self.journal.append("context_compacted", reason="provider_context_overflow")
                     continue
-                self.stop_reason = "provider_error"
+                self.stop_reason = "time_budget" if self.budget.research_remaining() <= 1 else "provider_error"
                 break
             charged = response.total_tokens or response.prompt_tokens + response.completion_tokens or estimate + len(json.dumps(response.message).encode("utf-8"))
             self.tokens_used += charged
@@ -843,10 +843,11 @@ class ResearchRun:
             best = select_best(self.results, self.task.maximize)
             self.postprocessing_plan = {'accepted':False, 'reason':'no_time_or_oof'}
             if self.split.get('mode') == 'evaluate_cv' and self.budget.remaining() > self.reserve_plan.get('overhead_seconds', 0) + 2:
-                from .ensemble import choose_postprocessing
+                from .ensemble import choose_postprocessing_bounded
                 try:
-                    self.postprocessing_plan = choose_postprocessing(self.task, self.split, self.results, self.directory,
-                        remaining_seconds=self.budget.remaining(), overhead_seconds=self.reserve_plan.get('overhead_seconds', 5))
+                    self.postprocessing_plan = choose_postprocessing_bounded(self.task, self.split, self.results, self.directory,
+                        remaining_seconds=self.budget.remaining(), overhead_seconds=self.reserve_plan.get('overhead_seconds', 5),
+                        refit_seconds=self.reserve_plan.get('estimated_fit_seconds') or 0.,memory_limit_mb=self.config.memory_limit_mb)
                     if self.postprocessing_plan.get('accepted'):
                         from .evaluation import publish_submission
                         publish_submission(self.task, Path(self.postprocessing_plan['prediction_path']), self.output)

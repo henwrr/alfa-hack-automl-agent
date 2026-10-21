@@ -500,7 +500,7 @@ def select_postprocessing(
         }
 
     model_probabilities: list[np.ndarray] | None = None
-    class_values = _ordered_classes(classes, y_values)
+    class_values = [] if task_type == 'regression' else _ordered_classes(classes, y_values)
     if probabilities is not None:
         if len(probabilities) < len(model_predictions):
             raise ValueError("There must be a probability array for every selected model.")

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 import json
-import math
 from pathlib import Path
 
 
@@ -102,14 +101,6 @@ def _clip_text(value, limit):
     return value[:head] + "\n[… контекст сокращён …]\n" + value[-tail:]
 
 
-def _finite_number(value):
-    try:
-        number = float(value)
-    except (TypeError, ValueError, OverflowError):
-        return None
-    return number if math.isfinite(number) else None
-
-
 def _compact_recipe_diagnostics(diagnostics, level):
     """Keep decision-relevant diagnostics while dropping fold-level noise."""
     diagnostics = diagnostics or {}
@@ -128,7 +119,7 @@ def _compact_recipe_diagnostics(diagnostics, level):
         rows = diagnostics.get("per_class") or []
         keep["per_class"] = [
             {key: row[key] for key in ("label", "precision", "recall", "f1", "support", "predicted") if key in row}
-            for row in rows[: max(4, 20 - level * 3)] if isinstance(row, dict)
+            for row in rows[: max(10, 20 - level * 3)] if isinstance(row, dict)
         ]
         for key in ("total_classes", "partial"):
             if key in diagnostics:
@@ -155,6 +146,8 @@ def _compact_recipe_diagnostics(diagnostics, level):
                     keep["confusion_matrix"]["partial"] = True
     if isinstance(diagnostics.get("partial"), bool):
         keep["partial"] = diagnostics["partial"]
+    if len(diagnostics.get('per_class') or []) > len(keep.get('per_class', [])):
+        keep['partial'] = True
     if "segments" in diagnostics:
         keep["segments"] = (diagnostics.get("segments") or [])[:max(2, 8 - level)]
     importance = diagnostics.get("feature_importance")
@@ -251,7 +244,7 @@ def _recipe_profile_context(profile, level):
     target = facts.get("target")
     if isinstance(target, dict):
         # Target counts are central for imbalanced classification and stay exact.
-        target = {key: target[key] for key in ("name", "dtype", "unique", "class_counts", "counts") if key in target}
+        target = {key: target[key] for key in ("name", "dtype", "unique", "missing", "numeric", "class_counts", "counts") if key in target}
         facts["target"] = target
 
     plan = facts.get("validation_plan")
@@ -486,7 +479,7 @@ def _build_recipe_messages(task, profile, results, best, runtime_context, feedba
             core["latest_experiment"] = {
                 key: content["latest_experiment"][key]
                 for key in ("trial_id", "status", "metric", "same_as_best", "error", "diagnostics")
-                if key in content["latest_experiment"]
+                if key in (content["latest_experiment"] or {})
             }
             if "error" in core["latest_experiment"]:
                 core["latest_experiment"]["error"] = _clip_text(core["latest_experiment"]["error"], 700)

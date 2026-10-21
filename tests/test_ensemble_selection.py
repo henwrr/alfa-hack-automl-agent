@@ -9,6 +9,22 @@ from automl_agent.contracts import ExperimentResult, TaskSpec
 from automl_agent.ensemble import choose_postprocessing
 
 
+def test_postprocessing_timeout_protects_the_final_single_model_refit(tmp_path, monkeypatch):
+    from automl_agent.ensemble import choose_postprocessing_bounded
+    calls=[]
+    def timeout(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(status='timeout', seconds=10., to_dict=lambda:{'status':'timeout','seconds':10.})
+    monkeypatch.setattr('automl_agent.runtime.run_process', timeout)
+    task=TaskSpec('task.md','train.csv','test.csv','y','regression','rmse',False,['x'],[],[],['y'],'hash')
+    plan=choose_postprocessing_bounded(task,{},[],tmp_path,remaining_seconds=50.,overhead_seconds=5.,refit_seconds=35.)
+    assert plan['reason']=='postprocessing_timeout' and not plan['accepted']
+    assert calls[0]['timeout']==10. and calls[0]['n_jobs']==1
+    calls.clear()
+    skipped=choose_postprocessing_bounded(task,{},[],tmp_path,remaining_seconds=39.,overhead_seconds=5.,refit_seconds=35.)
+    assert skipped['reason']=='insufficient_postprocessing_time' and not calls
+
+
 def test_host_blends_only_matching_oof_and_checks_cost(tmp_path):
     y=np.arange(60)/3
     ids=np.repeat(np.arange(3),20)

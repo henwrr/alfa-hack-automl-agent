@@ -1,0 +1,16 @@
+{
+  "phase": "green",
+  "command": [
+    ".venv/bin/python",
+    "-m",
+    "pytest",
+    "tests/test_postprocessing.py",
+    "tests/test_ensemble_selection.py",
+    "-q"
+  ],
+  "cwd": "/Users/egoraprelsky/Desktop/coding/alfa_hackathon",
+  "started_at_utc": "2026-10-21T17:35:50.214277+00:00",
+  "returncode": 0,
+  "output": "....................                                                     [100%]\n20 passed in 1.11s\n",
+  "seconds": 1.357
+}

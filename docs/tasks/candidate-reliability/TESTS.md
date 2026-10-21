@@ -26,3 +26,12 @@ Core red:5поведенческихпаденийunknownrecipe/defaultinheritan
 ## Компактная история и остановка по времени
 - History/provider/research integration: 14 passed, 20.17s. Параметры и fit_options сохраняются в последней сбалансированной assistant/tool группе, подробные diagnostics не дублируются в tool result; оригинальные события не изменяются.
 - RED `20261020T092432.805172Z-red.json`: восемь неулучшающих опытов всё ещё завершали default run при 1200s остатка. Удалён этот косвенный trial limit; finish допустим, когда по измеренной длительности следующий опыт уже не помещается перед резервом. Green timefirst/history/providers: 12 passed, 5.56s (`20261020T092441.357743Z-green.json`).
+
+## Review и исправления 21 октября
+- Context review: реальные confusion/partial/numeric-category shift/without_temporal AUC и1000 trials проверены;18 focused passed до root merge,41 integrated passed после обновления test provider под новый compact payload.
+- File guard RED3: альтернативный reader, reader import alias, __file__ принимались; после исправления tools/recipes77passed.
+- Regression postprocessing RED: запрещён вызов class discovery для50000 непрерывных targets. Исправление убирает квадратичную работу;20 postprocessing/host tests passed. Real saved-public replay:447.152s→0.213s, scores точно те же48.23387423/47.88737836.
+- Timeout policy RED: отсутствовал bounded этап; после реализации regression/classification CV integration41passed16.03s. Таймаут процесса ограничен min(60s, remaining−measured single refit reserve−write margin); при отказе сохраняется bestsingle.
+- Сохранён и не скрыт промежуточный failed integration log `20261021T173722.323044Z-green.json`:2 fake-provider assertions обращались к старой форме experiments. Actual worker failure не было; provider fixture обновлён на measured_bases и best_experiment diagnostics. Повторный log `20261021T173804.733785Z-green.json`:41passed.
+
+Полный suite после всех интеграций: **374 passed**,2 прежних Linear warnings,77.49s,exit0. Log:20261021T173857.892023Z-green.json.

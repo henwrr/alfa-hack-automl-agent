@@ -6,6 +6,16 @@ import pytest
 from automl_agent.postprocessing import apply_postprocessing, select_postprocessing
 
 
+def test_regression_postprocessing_never_enumerates_continuous_targets_as_classes(monkeypatch):
+    def reject_class_discovery(*args):
+        raise AssertionError('Continuous targets must not enter class discovery')
+    monkeypatch.setattr('automl_agent.postprocessing._ordered_classes', reject_class_discovery)
+    y=np.linspace(0,1000,50000)
+    result=select_postprocessing(y=y, predictions=[y+1,y-1], probabilities=None, classes=[],
+        fold_ids=np.arange(len(y))%5, metric='rmse', maximize=False)
+    assert result['accepted'] and result['calibrated_oof_score'] < 1e-10
+
+
 def _binary_fixture(folds=4):
     y = np.asarray(["major", "minor"] * (folds * 10))
     fold_ids = np.repeat(np.arange(folds), 20)
