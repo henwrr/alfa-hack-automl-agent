@@ -179,6 +179,18 @@ def test_measured_bases_keep_requested_tree_cap_preprocessing_and_fit_weights():
     assert base['recipe']['preprocessing']['add_missing_indicators'] is True
 
 
+def test_recipe_catalog_excludes_families_without_a_successful_base():
+    task, profile, results = _task(10, 100), _profile(10), _results(2)
+    results[0].recipe={'family':'XGBoost','parameters':{'n_estimators':3000},'preprocessing':{}}
+    messages=build_messages(task,profile,results,results[0],{'n_jobs':4,'experiment_mode':'recipe'},compact=True)
+    catalog=json.loads(messages[1]['content'])['model_catalog']
+    available=set(catalog.get('families',{}))|set(catalog.get('boosting_families',{}))
+    assert available=={'XGBoost'}
+    assert 'CatBoost auto_class_weights=' not in messages[0]['content']
+    assert 'fit_options.sample_weight' in messages[0]['content']
+    assert 'family is fixed by base_trial_id' in messages[0]['content']
+
+
 def test_recipe_diagnostics_keep_confusion_axis_partial_flag_and_nested_auc():
     task, profile, results = _task(10, 100), _profile(10), _results(2)
     labels = [f"class_{index}" for index in range(10)]

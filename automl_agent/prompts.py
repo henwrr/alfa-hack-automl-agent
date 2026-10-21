@@ -204,6 +204,9 @@ def _recipe_catalog_context(task_type, profile, results, maximize=True):
             }
     if best_by_family:
         catalog["measured_bases"] = list(best_by_family.values())
+        for section in ('families','boosting_families'):
+            catalog[section] = {name:schema for name,schema in catalog.get(section,{}).items()
+                                if name in best_by_family}
     return catalog
 
 
@@ -515,6 +518,19 @@ def _build_recipe_messages(task, profile, results, best, runtime_context, feedba
             )
 
     system_prompt = RECIPE_SYSTEM_PROMPT
+    active_families={row['family'] for row in catalog.get('measured_bases',[])}
+    if task.task_type == 'classification':
+        weight_guidance=[]
+        if 'CatBoost' in active_families:
+            weight_guidance.append('CatBoost: parameters.auto_class_weights="Balanced" or "SqrtBalanced".')
+        if active_families & {'ExtraTrees','Linear'}:
+            weight_guidance.append('ExtraTrees/Linear: parameters.class_weight="balanced".')
+        if active_families & {'LightGBM','XGBoost'}:
+            weight_guidance.append('LightGBM/XGBoost: fit_options.sample_weight="sqrt_balanced" or "balanced"; never auto_class_weights or constructor sample_weight.')
+        system_prompt='\n'.join(('For imbalanced classification and macro_f1, compare untested weight settings with the measured unweighted base, retaining its learning rate and tree cap. '+ ' '.join(weight_guidance))
+            if line.startswith('For imbalanced classification and macro_f1') else line
+            for line in system_prompt.splitlines())
+    system_prompt += '\nThe model family is fixed by base_trial_id: edit a successful measured base from model_catalog.measured_bases; a different name in hypothesis cannot switch the family. Encode every intended change in parameters/preprocessing/fit_options. A hypothesis alone never changes configuration. Omit unchanged fields instead of copying base defaults.\n'
     if task.task_type == "regression":
         system_prompt = "\n".join(line for line in system_prompt.splitlines()
                                   if not line.startswith("For imbalanced classification and macro_f1"))

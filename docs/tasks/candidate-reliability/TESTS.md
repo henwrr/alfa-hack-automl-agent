@@ -39,3 +39,5 @@ Core red:5поведенческихпаденийunknownrecipe/defaultinheritan
 Дополнительный context RED20261021T180835.877503Z-red.json: measured_bases не сохранял actual fit-only weights и requested max_iterations. Исправление добавляет точную recipe рядом с native parameters. Полный suite:375passed,2knownLinearwarnings,86.22s,log20261021T180840.932179Z-green.json.
 
 ZIP обновлён после context fix; fresh process импортирует prompts.py именно из распакованного runtime. Actual classification payload22488 chars, requested XGBcap3000 и measured430 остаются раздельно. Enhanced verify_run проверяет fold weight mode и reason при пропуске stopping; на ZIP CV5 прошёл (все5fold summaries).
+
+Actual LLM context error: failed/unmeasured families оставались в recipe catalog, хотя tool умеет только edits successful bases. Из-за этого qwen9b предложил CatBoostauto_class_weights для XGB. Новый RED20261021T182747.189382Z-red.json подтвердил; catalog теперь ограничен measuredfamilies, weighting guidance динамический и family-fixed contract явный. Target context/recipe/history/CV integration:23passed17.85s (20261021T182801.829851Z-green.json). После обоих public выполнить final fullsuite.
