@@ -1,6 +1,0 @@
-{
-  "phase": "green",
-  "command": "/Users/egoraprelsky/Desktop/coding/alfa_hackathon/.venv/bin/python -m pytest tests/test_realized_parameters.py tests/test_model_metadata.py tests/test_worker.py -q",
-  "exit_code": 0,
-  "result": "14 passed in 8.08s"
-}

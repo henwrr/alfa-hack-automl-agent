@@ -7,12 +7,25 @@ __pycache__
 .env.*
 !.env.example
 tests
+docs
 dist
 runs
 artifacts
-docs/research
+logs
+tmp
+catboost_info
+data
+datasets
+another_agents
 Регрессия
 Многоклассовая классификация
 *.pdf
 *.csv
+*.tsv
+*.parquet
+*.joblib
+*.pkl
+*.npy
+*.npz
+*.zip
 *.log

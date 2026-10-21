@@ -1,7 +1,0 @@
-{
-  "phase": "full-suite-verification",
-  "command": "/Users/egoraprelsky/Desktop/coding/alfa_hackathon/.venv/bin/python -m pytest -q --tb=short",
-  "exit_code": 0,
-  "summary": "70 passed in 17.72s",
-  "output": "......................................................................   [100%]\n70 passed in 17.72s"
-}
