@@ -35,7 +35,20 @@ def verify_run(directory):
                 raise ValueError('Stored metric differs from host rescore: ' + trial['trial_id'])
             if hashlib.sha256((artifact/'code.py').read_bytes()).hexdigest() != trial['code_hash']:
                 raise ValueError('Candidate source checksum changed')
-            rescored.append({'trial_id':trial['trial_id'], 'metric':metric})
+            options=(trial.get('recipe') or {}).get('fit_options',{})
+            folds=trial.get('model_details',{}).get('training',{}).get('folds',[])
+            if split.get('mode')=='evaluate_cv' and trial.get('recipe'):
+                if len(folds) != split['fold_count']:
+                    raise ValueError('Missing fold training summaries')
+                for fold in folds:
+                    if fold.get('sample_weight_mode') != options.get('sample_weight'):
+                        raise ValueError('Applied fold weights differ from the requested recipe')
+                    if options.get('early_stopping_rounds',0)>0 and not fold.get('early_stopping_used') and not fold.get('reason'):
+                        raise ValueError('Requested early stopping was omitted without a recorded reason')
+            rescored.append({'trial_id':trial['trial_id'], 'metric':metric,
+                'family':(trial.get('recipe') or {}).get('family'), 'is_baseline':trial['is_baseline'],
+                'fit_options':options,'fold_sample_weight_modes':[f.get('sample_weight_mode') for f in folds],
+                'fold_best_iterations':[f.get('best_iteration') for f in folds]})
         process_path = artifact/'process.json'
         if process_path.exists():
             process=json.loads(process_path.read_text())

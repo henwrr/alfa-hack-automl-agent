@@ -37,3 +37,5 @@ Core red:5поведенческихпаденийunknownrecipe/defaultinheritan
 Полный suite после всех интеграций: **374 passed**,2 прежних Linear warnings,77.49s,exit0. Log:20261021T173857.892023Z-green.json.
 
 Дополнительный context RED20261021T180835.877503Z-red.json: measured_bases не сохранял actual fit-only weights и requested max_iterations. Исправление добавляет точную recipe рядом с native parameters. Полный suite:375passed,2knownLinearwarnings,86.22s,log20261021T180840.932179Z-green.json.
+
+ZIP обновлён после context fix; fresh process импортирует prompts.py именно из распакованного runtime. Actual classification payload22488 chars, requested XGBcap3000 и measured430 остаются раздельно. Enhanced verify_run проверяет fold weight mode и reason при пропуске stopping; на ZIP CV5 прошёл (все5fold summaries).

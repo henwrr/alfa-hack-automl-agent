@@ -151,7 +151,7 @@
     "automl_agent/modeling.py": "a379b89e45894ca62110b5c60c04cbcfa0bf93035cf47eb63ecf3e351494527a",
     "automl_agent/postprocessing.py": "8098ec83226b8839fc24b8c5ccc1a8b84dc397e073fb12023ee58141d9ea0821",
     "automl_agent/prediction.py": "65317477a84f9f30d767cb4eb665238e3722d2fbe6e58abc5cb3269da4913eff",
-    "automl_agent/prompts.py": "3cb9c7431b209c69425cc7d87396fa130e913d7aeef6b77b2ee2345b176bb9e5",
+    "automl_agent/prompts.py": "7906cd6df9489f8cf1bef327f6ec29a7ee11fc860bd874dfcc4a8c52f671d83c",
     "automl_agent/providers.py": "6ea003aee17c58225d988ca2cb123e10b3b699fa3656a88d5ee00c4a1fbfadc5",
     "automl_agent/recipes.py": "0ceb43eb941131ee7172788e57a9132839f076b8557070997a90fe5d20b28c27",
     "automl_agent/runtime.py": "4b1c937c8f3ac3d50159c1afdb15a1aa152921fc2ee029194af3942760b2757d",
@@ -184,5 +184,11 @@
       "agent_log": "9281aef35e8204413bb6049153989036e2d285a90c26c4b2f986dc28f69a0ab4",
       "decisions": "ee72ec1f6ac83f880c2928b2f8d8345be8e7f85a79b9e32d2c5cd66c032df612"
     }
+  },
+  "updated_prompt_package_check": {
+    "payload_chars": 22488,
+    "unpacked_prompt_module": "/private/var/folders/c2/43y9jwz953gddvrb_dkrwyy40000gn/T/automl-zip-20261021-3a0dk8qv/runtime/automl_agent/prompts.py",
+    "requested_tree_cap": 3000,
+    "measured_trees": 430
   }
 }
