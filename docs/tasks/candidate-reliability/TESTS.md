@@ -35,3 +35,5 @@ Core red:5поведенческихпаденийunknownrecipe/defaultinheritan
 - Сохранён и не скрыт промежуточный failed integration log `20261021T173722.323044Z-green.json`:2 fake-provider assertions обращались к старой форме experiments. Actual worker failure не было; provider fixture обновлён на measured_bases и best_experiment diagnostics. Повторный log `20261021T173804.733785Z-green.json`:41passed.
 
 Полный suite после всех интеграций: **374 passed**,2 прежних Linear warnings,77.49s,exit0. Log:20261021T173857.892023Z-green.json.
+
+Дополнительный context RED20261021T180835.877503Z-red.json: measured_bases не сохранял actual fit-only weights и requested max_iterations. Исправление добавляет точную recipe рядом с native parameters. Полный suite:375passed,2knownLinearwarnings,86.22s,log20261021T180840.932179Z-green.json.

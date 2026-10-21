@@ -200,6 +200,7 @@ def _recipe_catalog_context(task_type, profile, results, maximize=True):
             best_by_family[family] = {
                 "family": family, "trial_id": result.trial_id, "metric": result.metric,
                 "parameters": details.get("parameters", {}),
+                "recipe": copy.deepcopy(recipe),
             }
     if best_by_family:
         catalog["measured_bases"] = list(best_by_family.values())

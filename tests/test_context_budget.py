@@ -164,6 +164,21 @@ def test_recipe_catalog_prefers_best_measured_base_and_prompt_runs_to_reserve():
     assert "Stop at the reserved deadline or after measured convergence" not in messages[0]["content"]
 
 
+def test_measured_bases_keep_requested_tree_cap_preprocessing_and_fit_weights():
+    task, profile, results = _task(10, 100), _profile(10), _results(3)
+    results[1].recipe={'family':'LightGBM','parameters':{'n_estimators':5000},
+        'preprocessing':{'add_missing_indicators':True},
+        'fit_options':{'early_stopping_rounds':100,'sample_weight':'sqrt_balanced'}}
+    results[1].model_details={'parameters':{'n_estimators':148,'class_weight':None}}
+    messages=build_messages(task,profile,results,results[0],{'n_jobs':4,'experiment_mode':'recipe'},compact=True)
+    catalog=json.loads(messages[1]['content'])['model_catalog']
+    base=next(row for row in catalog['measured_bases'] if row['family']=='LightGBM')
+    assert base['parameters']['n_estimators']==148
+    assert base['recipe']['parameters']['n_estimators']==5000
+    assert base['recipe']['fit_options']['sample_weight']=='sqrt_balanced'
+    assert base['recipe']['preprocessing']['add_missing_indicators'] is True
+
+
 def test_recipe_diagnostics_keep_confusion_axis_partial_flag_and_nested_auc():
     task, profile, results = _task(10, 100), _profile(10), _results(2)
     labels = [f"class_{index}" for index in range(10)]
