@@ -1,5 +1,5 @@
 {
-  "run_dir": "/private/var/folders/c2/43y9jwz953gddvrb_dkrwyy40000gn/T/automl-zip-20261021-3a0dk8qv/run",
+  "run_dir": "/private/var/folders/c2/43y9jwz953gddvrb_dkrwyy40000gn/T/automl-mvp-final-re997rtb/run",
   "status": "offline",
   "stop_reason": "offline",
   "metric": "macro_f1",
@@ -8,7 +8,7 @@
   "llm_calls": 0,
   "llm_trials": 0,
   "total_tokens": 0,
-  "elapsed_seconds": 4.376,
+  "elapsed_seconds": 4.388,
   "validation_plan": {
     "coverage": 1.0,
     "fold_count": 5,
@@ -19,7 +19,28 @@
   "rescored_trials": [
     {
       "trial_id": "trial_0001",
-      "metric": 0.9832167832167833
+      "metric": 0.9832167832167833,
+      "family": "CatBoost",
+      "is_baseline": true,
+      "fit_options": {
+        "early_stopping_rounds": 100,
+        "inner_validation_fraction": 0.15,
+        "sample_weight": null
+      },
+      "fold_sample_weight_modes": [
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "fold_best_iterations": [
+        813,
+        901,
+        493,
+        449,
+        381
+      ]
     }
   ],
   "trial_statuses": {
@@ -39,7 +60,7 @@
       "positive",
       "negative"
     ],
-    "estimated_fit_seconds": 0.12888437438959954,
+    "estimated_fit_seconds": 0.12846843750594417,
     "fold_scores": [
       {
         "assessed_score": 1.0,
@@ -106,9 +127,9 @@
       "trial_0001"
     ],
     "reason": "no_meta_improvement",
-    "seconds": 0.553844666981604,
+    "seconds": 0.5828630829928443,
     "split_fingerprint": "71cedccf48f0cc42acf069a0a2e15881991e22b1dd0617e7e400579124948e98",
-    "timeout_seconds": 51.9123182496478,
+    "timeout_seconds": 51.948095937514154,
     "warnings": [
       "OOF postprocessing не улучшил основную метрику на независимых folds.",
       "Meta-fold assessment reuses adaptively selected base OOF models; this is not nested CV or an independent test score."
@@ -132,12 +153,17 @@
   "max_allocated_cpu": 1,
   "submission_sha256": "0bc0aa3a3ddb6deeaa57c6c1c8b5fd31e03ccce664070dfa09002e6660bac017",
   "test_kind": "unpacked_zip_default_cv_offline_new_schema",
+  "completed_resume": {
+    "canonical_events_model_submission_unchanged": true,
+    "damaged_projections_restored_exactly": true
+  },
+  "zip_sha256": "4d7077ca12574664a1cf00aa230562b29d89533ba42ddd5d59a34a04543a7f2c",
   "runtime_source_sha256": {
     "automl_agent/__init__.py": "c4a80db9aa1d60853d922fd611b3e35de712c68de3c76194e2a3c3fabe86afe2",
-    "automl_agent/agent.py": "0258b47bd0ee8e7526a7eaf5f6a5aac6003406cb0b3ffe09931d4f043386149b",
+    "automl_agent/agent.py": "9b1f296666606397550d3b1a9538406fc81c2c7c1436f5ffe9ae2b41c751d246",
     "automl_agent/audit.py": "58fae1c2dea20d56626fc584667baf621bd4156c6425be5fc5a3085e6c078ff0",
     "automl_agent/budgeting.py": "b5ec15f0ceb7dc94ca088e39e71479b63082e84abae97c756e0c552ab6009b1d",
-    "automl_agent/config.py": "a9c4e23734921fe3cf0a5a1981abfba02dfb5b7f00a363b0ebfce226c35beace",
+    "automl_agent/config.py": "6331e0b3c5aebc74e4ba733caa0706675ab70c4d54c353b92795291822d2d9e4",
     "automl_agent/contracts.py": "cc4167a00ac107f8419c711e8340189a08c9aa77c03f2db6a38796e6fbc65049",
     "automl_agent/cv_worker.py": "8baaacdbff1b8a97436a8a2cac710595a5928721ac0d7f61d1c12c3834537b7d",
     "automl_agent/data.py": "f1b1df86fb32d77293703d4d26c83d4e37f12187606222c31ecda26a303d0fe8",
@@ -151,7 +177,7 @@
     "automl_agent/modeling.py": "a379b89e45894ca62110b5c60c04cbcfa0bf93035cf47eb63ecf3e351494527a",
     "automl_agent/postprocessing.py": "8098ec83226b8839fc24b8c5ccc1a8b84dc397e073fb12023ee58141d9ea0821",
     "automl_agent/prediction.py": "65317477a84f9f30d767cb4eb665238e3722d2fbe6e58abc5cb3269da4913eff",
-    "automl_agent/prompts.py": "7906cd6df9489f8cf1bef327f6ec29a7ee11fc860bd874dfcc4a8c52f671d83c",
+    "automl_agent/prompts.py": "34698297a39d8df881b94e026abac6583ce6e0ceba9efa7f240fbb3080bdc524",
     "automl_agent/providers.py": "6ea003aee17c58225d988ca2cb123e10b3b699fa3656a88d5ee00c4a1fbfadc5",
     "automl_agent/recipes.py": "0ceb43eb941131ee7172788e57a9132839f076b8557070997a90fe5d20b28c27",
     "automl_agent/runtime.py": "4b1c937c8f3ac3d50159c1afdb15a1aa152921fc2ee029194af3942760b2757d",
@@ -162,33 +188,5 @@
     "automl_agent/validation.py": "8d9bc319032c61684ecf0f6c7a8326b5bdaf81b9e3546b6c37cf2ed7d3e9017d",
     "automl_agent/worker.py": "0c4f654af2e9ec812b8d6aaa03de2819f14ec0f4bc5edcde338566ce31f39416",
     "solution.py": "32944ca40b3788030575e0161c0dd75ce0c0964d9049535dd079258d9e6d0af0"
-  },
-  "zip_cli_working_directory": "/var/folders/c2/43y9jwz953gddvrb_dkrwyy40000gn/T/automl-zip-20261021-3a0dk8qv",
-  "unpacked_runtime": "/var/folders/c2/43y9jwz953gddvrb_dkrwyy40000gn/T/automl-zip-20261021-3a0dk8qv/runtime",
-  "test_data_fingerprint": "8ec855365b2f94d885d83570470aaca815c6b33d32526b0fd55221b7db96359f",
-  "completed_resume": {
-    "exit_code": 0,
-    "same_canonical_events_model_submission": true,
-    "corrupted_projections_rebuilt_exactly": true,
-    "before": {
-      "events": "667e3e8465e1e1d31be18c2ffb66914abc746359cf08f70f2972c13514d67ab6",
-      "model": "f1a34415c14b6e9afe34ae8b43f8ae389b4e4a40e300a216de0990c43794f8d9",
-      "submission": "0bc0aa3a3ddb6deeaa57c6c1c8b5fd31e03ccce664070dfa09002e6660bac017",
-      "agent_log": "9281aef35e8204413bb6049153989036e2d285a90c26c4b2f986dc28f69a0ab4",
-      "decisions": "ee72ec1f6ac83f880c2928b2f8d8345be8e7f85a79b9e32d2c5cd66c032df612"
-    },
-    "after": {
-      "events": "667e3e8465e1e1d31be18c2ffb66914abc746359cf08f70f2972c13514d67ab6",
-      "model": "f1a34415c14b6e9afe34ae8b43f8ae389b4e4a40e300a216de0990c43794f8d9",
-      "submission": "0bc0aa3a3ddb6deeaa57c6c1c8b5fd31e03ccce664070dfa09002e6660bac017",
-      "agent_log": "9281aef35e8204413bb6049153989036e2d285a90c26c4b2f986dc28f69a0ab4",
-      "decisions": "ee72ec1f6ac83f880c2928b2f8d8345be8e7f85a79b9e32d2c5cd66c032df612"
-    }
-  },
-  "updated_prompt_package_check": {
-    "payload_chars": 22488,
-    "unpacked_prompt_module": "/private/var/folders/c2/43y9jwz953gddvrb_dkrwyy40000gn/T/automl-zip-20261021-3a0dk8qv/runtime/automl_agent/prompts.py",
-    "requested_tree_cap": 3000,
-    "measured_trees": 430
   }
 }
