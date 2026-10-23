@@ -8,8 +8,10 @@ from numbers import Integral, Real
 from automl_agent.contracts import ExperimentResult
 
 _INITIAL_FRACTION = 0.15
-_MINIMUM_FRACTION = 0.05
+_INITIAL_RESERVE_CAP_SECONDS = 150.0
 _SAFETY_FACTOR = 1.5
+_STARTUP_GUARD_SECONDS = 8.0
+_OVERHEAD_CAP_SECONDS = 60.0
 
 
 def _finite_number(value: object, name: str) -> float:
@@ -43,20 +45,31 @@ def _measurement_seconds(best: ExperimentResult | None) -> float | None:
 
 
 def _initial_plan(total_seconds: float) -> dict:
+    floor = minimum_finalization_reserve_seconds(total_seconds)
     return {
-        "reserve_seconds": initial_reserve_seconds(total_seconds),
+        "reserve_seconds": min(total_seconds, max(floor, min(initial_reserve_seconds(total_seconds), _INITIAL_RESERVE_CAP_SECONDS))),
         "estimated_fit_seconds": None,
         "source": "initial",
         "selected_trial": None,
         "row_scale": None,
         "safety_factor": None,
+        "startup_guard_seconds": 0.0,
         "overhead_seconds": 0.0,
+        "required_seconds": None,
         "feasible": True,
     }
 
 
+def minimum_finalization_reserve_seconds(total_seconds: float) -> float:
+    """A short-run finalization floor that stays bounded for long jobs."""
+    total = _total_budget(total_seconds)
+    short_run_floor = min(30.0, 6.0 + total * 0.10)
+    proportional_floor = min(_INITIAL_RESERVE_CAP_SECONDS, total * 0.05)
+    return min(total, max(12.0, short_run_floor, proportional_floor))
+
+
 def initial_reserve_seconds(total_seconds: float) -> float:
-    """Return the startup reserve (15% of budget), without a fixed cap."""
+    """Return the original 15% startup reserve before measurements exist."""
     return _total_budget(total_seconds) * _INITIAL_FRACTION
 
 
@@ -100,9 +113,10 @@ def plan_finalization(
     estimated_fit = measured_seconds * row_scale * _SAFETY_FACTOR
     # Reserve time for writing artifacts and the final result. Scale with the
     # run while retaining a small absolute minimum for short runs.
-    overhead = min(total, max(5.0, total * 0.01))
+    overhead = min(total, _OVERHEAD_CAP_SECONDS, max(_STARTUP_GUARD_SECONDS, total * 0.01))
+    startup_guard = min(overhead, _STARTUP_GUARD_SECONDS)
     projected_cost = estimated_fit + overhead
-    reserve = min(total, max(total * _MINIMUM_FRACTION, projected_cost))
+    reserve = min(total, max(minimum_finalization_reserve_seconds(total), projected_cost))
     return {
         "reserve_seconds": reserve,
         "estimated_fit_seconds": estimated_fit,
@@ -110,6 +124,41 @@ def plan_finalization(
         "selected_trial": getattr(best, "trial_id", None),
         "row_scale": row_scale,
         "safety_factor": _SAFETY_FACTOR,
+        "startup_guard_seconds": startup_guard,
         "overhead_seconds": overhead,
+        "required_seconds": projected_cost,
         "feasible": projected_cost <= total,
     }
+
+
+def can_start_final_fit(remaining_seconds: object, plan: dict) -> bool:
+    """Return whether the entire measured fit and finalization window remains."""
+    if not isinstance(plan, dict) or not plan.get("feasible"):
+        return False
+    estimated = plan.get("estimated_fit_seconds")
+    if estimated is None:
+        return False
+    try:
+        remaining = _finite_number(remaining_seconds, "remaining_seconds")
+        required = _finite_number(plan.get("required_seconds"), "required_seconds")
+        guard = _finite_number(plan.get("startup_guard_seconds"), "startup_guard_seconds")
+    except ValueError:
+        return False
+    return remaining >= max(required, float(estimated) + guard)
+
+
+def trial_time_cap(
+    *, total_seconds: object, research_seconds: object, requested_cap: object | None = None
+) -> float:
+    """Adapt a single trial's cap to the run and current research window."""
+    total = _total_budget(total_seconds)
+    research = _finite_number(research_seconds, "research_seconds")
+    if research < 0:
+        raise ValueError("research_seconds must be nonnegative")
+    cap = min(max(30.0, total / 6.0), total / 4.0, research / 6.0)
+    if requested_cap is not None:
+        requested = _finite_number(requested_cap, "requested_cap")
+        if requested <= 0:
+            raise ValueError("requested_cap must be positive")
+        cap = min(cap, requested)
+    return max(0.0, cap)
