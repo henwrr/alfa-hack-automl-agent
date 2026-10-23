@@ -492,7 +492,12 @@ def run_workspace(workspace: str | Path, threads: int = 2) -> dict:
             _write_json_atomic(output_path, output)
         results.append(case_result)
 
-    output["run_status"] = "completed"
+    output["run_status"] = (
+        "completed"
+        if all(run.get("status") == "completed" and run.get("valid")
+               for case_result in results for run in case_result["runs"])
+        else "partial_failure"
+    )
     output["cases"] = results
     _write_json_atomic(output_path, output)
     return output

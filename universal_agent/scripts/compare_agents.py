@@ -62,6 +62,12 @@ def stage_sources(repo, directory, names):
             raise ValueError(f"Missing pinned entrypoint: {name}")
         raw = subprocess.check_output(["git", "archive", "--format=tar", revision, "--", *paths], cwd=repo)
         target = Path(directory) / name
+        if target.is_symlink():
+            raise ValueError("Pinned source directory must not be a symlink")
+        # A resumed workspace must contain exactly the pinned runtime. Otherwise
+        # stale modules can affect imports without appearing in its source hash.
+        if target.exists():
+            shutil.rmtree(target)
         target.mkdir(parents=True, exist_ok=True)
         with tarfile.open(fileobj=io.BytesIO(raw)) as archive:
             for member in archive.getmembers():

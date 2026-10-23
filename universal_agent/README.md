@@ -2,7 +2,7 @@
 
 Агент для single-target табличной регрессии и классификации: читает task.md и CSV, строит общий план валидации, проверяет гипотезы LLM, выбирает модель и атомарно сохраняет submission.csv рядом с task.md.
 
-Подробные [условия](https://github.com/aprelskiyegor/alfa_hackathon/blob/main/universal_agent/docs/HACKATHON_REQUIREMENTS.md), [аудит четырёх агентов](https://github.com/aprelskiyegor/alfa_hackathon/blob/main/universal_agent/docs/AGENT_REVIEW.md), [происхождение решений](https://github.com/aprelskiyegor/alfa_hackathon/blob/main/universal_agent/docs/PROVENANCE.md), [проверки и ограничения](https://github.com/aprelskiyegor/alfa_hackathon/blob/main/universal_agent/docs/VALIDATION.md).
+Подробные [условия](https://github.com/aprelskiyegor/alfa_hackathon/blob/main/universal_agent/docs/HACKATHON_REQUIREMENTS.md), [аудит четырёх агентов](https://github.com/aprelskiyegor/alfa_hackathon/blob/main/universal_agent/docs/AGENT_REVIEW.md), [происхождение решений](https://github.com/aprelskiyegor/alfa_hackathon/blob/main/universal_agent/docs/PROVENANCE.md), [проверки и ограничения](https://github.com/aprelskiyegor/alfa_hackathon/blob/main/universal_agent/docs/VALIDATION.md), [сравнение пяти агентов на внешнем контроле](https://github.com/aprelskiyegor/alfa_hackathon/blob/main/universal_agent/docs/AGENT_COMPARISON.md).
 
 ## Установка и запуск
 

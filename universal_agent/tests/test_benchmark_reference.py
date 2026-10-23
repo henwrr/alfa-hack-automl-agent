@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from universal_agent.scripts.benchmark_reference import REFERENCE_SPEC, run_workspace
 
@@ -15,7 +16,7 @@ def _write_case(workspace: Path, *, name: str, task_type: str, target: str, metr
     evaluator_dir = workspace / "evaluator" / name
     task_dir.mkdir(parents=True)
     evaluator_dir.mkdir(parents=True)
-    ids = [f"{name}-{index:04d}" for index in range(28)]
+    ids = np.asarray([f"{name}-{index:04d}" for index in range(28)], dtype=object)
     x = np.arange(28, dtype=float)
     category = np.where(x.astype(int) % 2, "odd", "even")
     if task_type == "regression":
@@ -80,16 +81,17 @@ def test_reference_specs_are_fixed_and_explicit():
     assert set(REFERENCE_SPEC) == {"dummy", "linear"}
     assert REFERENCE_SPEC["dummy"]["regression"] == {"estimator": "DummyRegressor", "strategy": "mean"}
     assert REFERENCE_SPEC["dummy"]["classification"] == {"estimator": "DummyClassifier", "strategy": "most_frequent"}
-    assert REFERENCE_SPEC["linear"]["regression"]["estimator"] == "Ridge"
-    assert REFERENCE_SPEC["linear"]["regression"]["alpha"] == 1.0
-    assert REFERENCE_SPEC["linear"]["classification"]["estimator"] == "LogisticRegression"
-    assert REFERENCE_SPEC["linear"]["classification"]["C"] == 1.0
+    assert REFERENCE_SPEC["linear"]["regression"]["estimator"] == "Pipeline(StandardScaler+Ridge)"
+    assert REFERENCE_SPEC["linear"]["regression"]["ridge_alpha"] == 1.0
+    assert REFERENCE_SPEC["linear"]["classification"]["estimator"] == "Pipeline(StandardScaler+LogisticRegression)"
+    assert REFERENCE_SPEC["linear"]["classification"]["logistic_C"] == 1.0
     assert REFERENCE_SPEC["linear"]["classification"]["class_weight"] is None
 
 
 def test_run_workspace_scores_fixed_references_and_records_hashes_without_truth(tmp_path):
     workspace = _workspace(tmp_path)
     result = run_workspace(workspace, threads=2)
+    assert result["run_status"] == "completed"
     assert result["threads"] == 2
     assert result["source_sha256"]
     assert result["data_module_sha256"]
@@ -120,8 +122,26 @@ def test_reference_rejects_mutated_task_inputs_before_fitting(tmp_path):
     with (Path(case["task_dir"]) / "test.csv").open("a", encoding="utf-8") as stream:
         stream.write("bad,row\n")
     result = run_workspace(workspace, threads=2)
+    assert result["run_status"] == "partial_failure"
     regression = next(item for item in result["cases"] if item["name"] == "tiny-regression")
     assert all(run["status"] == "input_hash_mismatch" for run in regression["runs"])
+
+
+@pytest.mark.parametrize("failure", ["timeout", "invalid_submission", "worker_error", "deadline_exhausted"])
+def test_reference_aggregate_status_does_not_hide_individual_failure(tmp_path, monkeypatch, failure):
+    from universal_agent.scripts import benchmark_reference
+    workspace = _workspace(tmp_path)
+
+    def simulated_run(case, model, *args):
+        if case["name"] == "tiny-binary" and model == "linear":
+            return {"model": model, "status": failure, "valid": False, "score": None}
+        return {"model": model, "status": "completed", "valid": True, "score": 1.0}
+
+    monkeypatch.setattr(benchmark_reference, "_run_one_model", simulated_run)
+    result = run_workspace(workspace)
+    assert result["run_status"] == "partial_failure"
+    assert json.loads((workspace / "reference_results.json").read_text())["run_status"] == "partial_failure"
+    assert result["cases"][1]["runs"][1]["status"] == failure
 
 
 def test_reference_cli_accepts_workspace_and_threads_and_writes_results(tmp_path):

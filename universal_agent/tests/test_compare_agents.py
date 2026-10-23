@@ -8,6 +8,30 @@ import pytest
 from scripts.compare_agents import agent_command, capture_process, run_stats
 
 
+def test_restaging_sources_removes_unhashed_stale_modules(tmp_path, monkeypatch):
+    import subprocess
+    from scripts import compare_agents
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "solution.py").write_text("import pkg.current\n")
+    (repo / "pkg").mkdir()
+    (repo / "pkg/current.py").write_text("VALUE = 1\n")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "solution.py", "pkg/current.py"], cwd=repo, check=True)
+    subprocess.run(["git", "-c", "user.name=Benchmark Test", "-c", "user.email=benchmark@example.invalid",
+                    "commit", "-qm", "fixture"], cwd=repo, check=True)
+    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    monkeypatch.setattr(compare_agents, "PINS", {"tiny": (revision, "", "pkg")})
+    first = compare_agents.stage_sources(repo, tmp_path / "sources", ["tiny"])[0]
+    target = Path(first["root"])
+    (target / "pkg/stale.py").write_text("VALUE = 'not in pinned source'\n")
+    second = compare_agents.stage_sources(repo, tmp_path / "sources", ["tiny"])[0]
+    assert not (target / "pkg/stale.py").exists()
+    assert second["source_sha256"] == first["source_sha256"]
+    assert set(second["runtime_files"]) == {p.relative_to(target).as_posix() for p in target.rglob("*.py")}
+
+
 @pytest.mark.parametrize("kind", ["universal", "aprelskiy", "oleg", "rakovskiy", "ruzik"])
 def test_commands_use_common_time_threads_seed_and_native_fold_options(tmp_path, kind):
     argv = agent_command({"kind": kind, "root": str(tmp_path)}, tmp_path / "task.md",
