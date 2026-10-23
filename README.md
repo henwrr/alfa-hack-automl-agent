@@ -12,6 +12,7 @@ uv pip install --python .venv/bin/python -r universal_agent/requirements-mvp.txt
 
 - [Подробный разбор условий](universal_agent/docs/HACKATHON_REQUIREMENTS.md)
 - [Плюсы и минусы всех четырёх агентов](universal_agent/docs/AGENT_REVIEW.md)
+- [Повторный аудит обновлённого Ruzik и перенесённые идеи](universal_agent/docs/reviews/ruzik_update_85f4988.md)
 - [Какие идеи из каких файлов перенесены](universal_agent/docs/PROVENANCE.md)
 - [Результаты тестов и ограничения](universal_agent/docs/VALIDATION.md)
 

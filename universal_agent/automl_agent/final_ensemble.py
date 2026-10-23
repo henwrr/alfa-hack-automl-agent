@@ -33,7 +33,7 @@ def _class_labels(context: dict[str, Any], y: pd.Series) -> list[Any]:
     return normalized
 
 
-def _validated_manifest(manifest: dict[str, Any]) -> tuple[dict, dict, list, np.ndarray, list | None]:
+def _validated_manifest(manifest: dict[str, Any]) -> tuple[dict, dict, list, np.ndarray, list | None, float | None, Any]:
     if type(manifest) is not dict:
         raise TypeError("manifest must be a dict")
     context, inputs = manifest.get("context"), manifest.get("inputs")
@@ -104,6 +104,23 @@ def _validated_manifest(manifest: dict[str, Any]) -> tuple[dict, dict, list, np.
             raise ValueError("class_multipliers are only valid for classification")
         multipliers = None
 
+    threshold = manifest.get("binary_threshold")
+    positive_class = manifest.get("positive_class", context.get("positive_class"))
+    if threshold is not None:
+        if task_type != "classification" or len(context.get("classes", [])) != 2:
+            raise ValueError("binary_threshold requires exactly two classification classes")
+        if context.get("metric") not in (None, "f1"):
+            raise ValueError("binary_threshold is only supported for binary f1")
+        if type(threshold) not in (int, float) or not math.isfinite(threshold) or not 0 <= threshold <= 1:
+            raise ValueError("binary_threshold must be a finite number in [0, 1]")
+        if positive_class is None or positive_class not in context["classes"]:
+            raise ValueError("binary_threshold requires a known positive_class")
+        if context.get("positive_class") is not None and positive_class != context["positive_class"]:
+            raise ValueError("binary threshold positive_class conflicts with context")
+        if multipliers is not None:
+            raise ValueError("binary_threshold cannot be combined with class_multipliers")
+        threshold = float(threshold)
+
     for key in ("train_features", "train_target", "test_features"):
         if type(inputs[key]) is not str or not inputs[key]:
             raise ValueError(f"inputs.{key} must be a file path")
@@ -111,7 +128,7 @@ def _validated_manifest(manifest: dict[str, Any]) -> tuple[dict, dict, list, np.
         raise ValueError("artifact_dir must be a path")
     if type(manifest.get("save_model", False)) is not bool:
         raise TypeError("save_model must be a bool")
-    return context, inputs, members, weights, multipliers
+    return context, inputs, members, weights, multipliers, threshold, positive_class
 
 
 def _atomic_npy(array: np.ndarray, path: Path) -> None:
@@ -166,7 +183,7 @@ def run_final_ensemble(manifest: dict[str, Any]) -> dict[str, Any]:
     are performed in order, using the host-selected iteration override and the
     shared train-only fitting API.
     """
-    context, inputs, members, weights, multipliers = _validated_manifest(manifest)
+    context, inputs, members, weights, multipliers, threshold, positive_class = _validated_manifest(manifest)
     from .worker import (
         _atomic_json,
         _capture_native_parameter_types,
@@ -235,6 +252,8 @@ def run_final_ensemble(manifest: dict[str, Any]) -> dict[str, Any]:
         classes=classes,
         weights=weights.tolist(),
         class_multipliers=multipliers,
+        binary_threshold=threshold,
+        positive_class=positive_class,
     )
     prediction = np.asarray(ensemble.predict(test_x)).reshape(-1)
     if len(prediction) != len(test_x):
@@ -266,6 +285,8 @@ def run_final_ensemble(manifest: dict[str, Any]) -> dict[str, Any]:
         "parameters": {
             "weights": weights.tolist(),
             "class_multipliers": multipliers,
+            "binary_threshold": threshold,
+            "positive_class": positive_class,
         },
         "parameters_source": "final_ensemble.manifest",
         "members": member_records,

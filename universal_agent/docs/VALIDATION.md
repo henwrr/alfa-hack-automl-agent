@@ -10,11 +10,19 @@
 .venv/bin/python -m pytest -q universal_agent/tests/test_packaging.py
 ```
 
-Исходный baseline: 378 passed. Целевые проверки последних исправлений: 49 passed, exit0. Упаковочные проверки: 3 passed, exit0; включая извлечение настоящего ZIP и запуск из постороннего рабочего каталога. **Полный финальный прогон: 416 passed, 2 warnings, exit0 за89.23с.** Два ConvergenceWarning относятся к намеренно ограниченной числом итераций sparse Linear-модели; они не пропущенные тесты и не ошибки.
+Исходный baseline: 378 passed. Предыдущая поставка `c1673e2`: 416 passed, 2 warnings, exit0 за89.23с. После переноса идей обновлённого Ruzik **полный прогон: 464 passed, 2 warnings, exit0 за90.80с.** Упаковочные проверки входят в полный набор: 3 passed, включая извлечение настоящего ZIP и запуск из постороннего рабочего каталога. Два ConvergenceWarning относятся к намеренно ограниченной числом итераций sparse Linear-модели; они не пропущенные тесты и не ошибки.
 
 Покрытие: определение target/metric/IDs, утечки и OOF alignment, temporal/group folds, fit-only feature statistics и vocabulary, malformed/nonnumeric DSL, сериализация, weights/early stopping, реальные backend/parameters, resource/deadline limits, ошибки LLM и recovery, resume, class axis/positive class, binary/multiclass probabilities, мета-постобработка, атомарный CSV, упаковка.
 
 При финальной проверке дополнительно воспроизведены и исправлены: пропуск класса в probability artifacts; coercion смешанных меток; поздняя ошибка конфликтующей sample schema; неверная ось текстовых классов в meta LogLoss; binary F1 без учёта явного positive class; отсутствие train_rows у holdout refit и потеря источника thread_count при слиянии metadata. Тесты сначала падали на конкретном отсутствующем поведении, затем прошли после исправления. Существующие assertions не ослаблялись. Один старый parser fixture изменён на бинарную цель для корректной single-column LogLoss-схемы; отдельный тест требует отклонять неподдержанную multiclass label-only схему.
+
+## Перенос из Ruzik 85f4988
+
+Повторная проверка 23.10.2026: [аудит и решения](reviews/ruzik_update_85f4988.md). Базовые целевые проверки до правок: 51 passed. Новые behavioral RED сначала показали отсутствие улучшения binary F1, отсутствие порога в финальной модели и кратком журнале; затем все эти сценарии прошли. Отдельно воспроизведено и исправлено изменение типа mixed labels. Существующие assertions не ослаблялись.
+
+48 новых тестов добавлены сверх 416: точный F1 sweep против независимого перебора на восьми seeds с ties/0/1, positive-first/reversed axis и numeric-one default, независимые meta folds и temporal prefix, отказ при отсутствии positive labels в meta-train и при calibration-only gain, неизменность вероятностей, старый ensemble без новых атрибутов, проверка manifest до загрузки candidate, настоящий host manifest builder + supervised final worker + CSV/model reload, fit-only ISO parsing и границы pandas timestamp, malformed/numeric/mixed date inputs, стабильность transform batch и standalone source/serialization. Целевой интегрированный набор: 63 passed, exit0; весь набор: 464 passed, exit0.
+
+В новых тестах используются небольшие synthetic fixtures; они подтверждают поведение и отсутствие конкретных утечек, а не качество на скрытом evaluator. Публичные Ollama-прогоны ниже относятся к предыдущей поставке и после этого изменения не повторялись. Протокол Ollama и runtime-зависимости не менялись. Чужие V5 benchmark scores не выдаются за результаты universal_agent.
 
 ## Полные публичные данные с реальной Ollama
 

@@ -26,6 +26,10 @@
 | Устойчивый журнал, redaction, resume оплаченных ответов | aprelskiy/journal.py,audit.py,agent.py | те же модули | Run lock, fsync/atomic snapshots, fingerprint, interrupted calls не повторяются молча |
 | Проверка схемы, строк, ID, finite predictions, атомарная замена | aprelskiy/evaluation.py; ruzik/data.py:write_submission | evaluation.py | ID как строки, exact order, вероятность/классы, round-trip. При ошибке кандидат не затирает прежний файл |
 | Детерминированный ZIP allowlist и независимая проверка запуска | aprelskiy/scripts/package_solution.py,verify_run.py и tests | scripts/,tests/ | Исправлен layout и доставлены все обязательные runtime-файлы; ZIP не включает исходные данные, тесты, secrets, models/runs |
+| Точный binary F1 threshold с учётом ties и positive class | Обновлённый ruzik, commit 85f4988ba11c70ebe2242c8722b32f2d4bea5c7a: ruzik_agent/decisions.py:19–35 | postprocessing.py:_tune_binary_threshold,binary_threshold_labels; ensemble.py, agent.py, final_ensemble.py, prediction.py, audit.py | Алгоритмическая идея заимствована; настройка перенесена в существующий cross-fitted/forward meta assessment. Отдельное правило меток, неизменные вероятности, проверки оси классов, сериализации и отказа при отсутствии независимого выигрыша |
+| Календарные epoch-days/month/weekday | Тот же обновлённый ruzik: ruzik_agent/models.py:98–116 | features.py:date_parts; экспортированный recipe source | Переписано как явная ограниченная операция без эвристики имени; ISO8601/UTC, fit-only проверка >95%, исходная колонка сохранена, защита границ timestamp и numeric-as-nanoseconds |
+
+Подробный [повторный аудит Ruzik 85f4988](reviews/ruzik_update_85f4988.md) отделён от первоначального snapshot и фиксирует полезные, уже покрытые и отложенные идеи новой ветки.
 
 ## Что намеренно исключено и почему
 
@@ -34,7 +38,7 @@
 - Их глобальная обрезка regression prediction диапазоном train target: запрещает полезную экстраполяцию. Для RMSLE используется только математически необходимый clip0 при оценке, а не ограничение train min/max для всех задач.
 - Синхронные fit без hard timeout: контролируются workers и общим CLI deadline.
 - Слепое добавление трёх seed к финалу: может съесть резерв без проверенного выигрыша. Используется bounded OOF ensemble; отдельный seed bagging не включён.
-- Автоматический target encoding/lag по подобранному ключу: ошибка temporal protocol или supervised selection легко завышает score. Пока нет проверяемого вложенного отбора, это не безопасное преимущество.
+- Автоматический target encoding/lag по подобранному ключу: ошибка temporal protocol или supervised selection легко завышает score. В новом Ruzik 85f4988 ключ выбирается без y и история strictly past-only; это существенное исправление. Перенос отложен до отдельной проверки вложенного отбора/временных границ и внешнего качества, а не объявлен заведомой утечкой обновлённой реализации.
 - Свободный custom pandas exec в декларативном режиме: заменён ограниченными операциями. Полный code mode остаётся отдельным явным режимом ядра с preflight/supervisor, не называется OS sandbox.
 - Все доступные AutoML framework сразу: не добавляют доказанного выигрыша и увеличивают импорт/ресурсы. Runtime использует только необходимое подмножество исходного requirements.txt.
 

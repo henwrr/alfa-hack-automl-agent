@@ -1,6 +1,21 @@
 {
   "validation_updated": "2026-10-23",
   "public_runs_date": "2026-10-21",
+  "ruzik_update": {
+    "source_commit": "85f4988ba11c70ebe2242c8722b32f2d4bea5c7a",
+    "universal_base_commit": "c1673e2a564dbe0dd0d0479076f7744d606bb318",
+    "ported_ideas": ["exact_binary_f1_threshold", "explicit_utc_date_parts"],
+    "baseline_targeted_tests_passed": 51,
+    "integrated_targeted_tests_passed": 63,
+    "full_tests_passed": 464,
+    "full_test_warnings": 2,
+    "full_test_seconds": 90.8,
+    "full_test_exit_code": 0,
+    "real_final_worker_and_model_reload_verified": true,
+    "probabilities_unchanged_by_binary_threshold": true,
+    "public_ollama_runs_repeated": false,
+    "hidden_quality_measured": false
+  },
   "runs": [
     {
       "run": "regression",

@@ -206,3 +206,63 @@ def test_final_refit_rejects_invalid_schema_or_label_leakage_before_candidate_lo
     with pytest.raises(ValueError):
         run_final_ensemble(manifest)
     assert not (tmp_path / "schema_artifacts" / "worker_result.json").exists()
+
+
+@pytest.mark.parametrize("threshold", [0., .3, 1.])
+def test_final_binary_threshold_preserves_probability_axis_and_survives_reload(tmp_path, threshold):
+    inputs, context, _ = _write_fixture(tmp_path)
+    context.update(metric="f1", positive_class="zebra")
+    test = pd.DataFrame({"x1": [.3, .2, .4], "x2": [0., 0., 0.]})
+    test.to_csv(inputs["test_features"], index=False)
+    code = _candidate(tmp_path, "probability_candidate.py", '''import numpy as np
+class Candidate:
+    def fit(self, X, y):
+        self.classes_ = np.array(['zebra', 'apple'])
+        return self
+    def predict_proba(self, X):
+        p = X['x1'].clip(0, 1).to_numpy()
+        return np.column_stack([p, 1-p])
+    def predict(self, X):
+        return self.classes_[self.predict_proba(X).argmax(axis=1)]
+def build_model(context):
+    return Candidate()
+''')
+    artifact = tmp_path / "binary_final"
+    result = run_final_ensemble({
+        "context": context, "inputs": inputs, "artifact_dir": str(artifact), "save_model": True,
+        "members": [{"code_path": code, "fit_options": {}, "trial_id": "binary"}],
+        "weights": [1.], "class_multipliers": None,
+        "binary_threshold": threshold, "positive_class": "zebra",
+    })
+    expected = np.where(test["x1"].to_numpy() >= threshold, "zebra", "apple")
+    actual = pd.read_csv(artifact / "test_predictions.csv")["target"].to_numpy()
+    np.testing.assert_array_equal(actual, expected)
+    restored = joblib.load(artifact / "model.joblib")
+    np.testing.assert_array_equal(restored.predict(test), expected)
+    np.testing.assert_array_equal(restored.predict_proba(test), np.column_stack([test["x1"], 1-test["x1"]]))
+    np.testing.assert_array_equal(np.load(artifact / "test_probabilities.npy"), restored.predict_proba(test))
+    assert result["estimator_details"]["parameters"]["binary_threshold"] == threshold
+    assert result["estimator_details"]["parameters"]["positive_class"] == "zebra"
+
+
+@pytest.mark.parametrize("threshold,positive,task_type,metric", [
+    (-.1, "zebra", "classification", "f1"),
+    (1.1, "zebra", "classification", "f1"),
+    (float("nan"), "zebra", "classification", "f1"),
+    (True, "zebra", "classification", "f1"),
+    (.3, "missing", "classification", "f1"),
+    (.3, "zebra", "classification", "roc_auc"),
+    (.3, "zebra", "regression", "rmse"),
+])
+def test_invalid_binary_decision_rejected_before_candidate_load(tmp_path, threshold, positive, task_type, metric):
+    inputs, context, _ = _write_fixture(tmp_path, task_type=task_type)
+    context.update(metric=metric, positive_class="zebra")
+    code = _candidate(tmp_path, "unreachable.py", "def build_model(context):\n    raise AssertionError('invalid decision must reject before fit')\n")
+    artifact = tmp_path / "invalid_binary"
+    with pytest.raises(ValueError):
+        run_final_ensemble({
+            "context": context, "inputs": inputs, "artifact_dir": str(artifact), "save_model": True,
+            "members": [{"code_path": code, "trial_id": "guard"}], "weights": [1.],
+            "binary_threshold": threshold, "positive_class": positive,
+        })
+    assert not (artifact / "worker_result.json").exists()

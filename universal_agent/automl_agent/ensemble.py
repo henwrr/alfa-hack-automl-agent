@@ -134,7 +134,8 @@ def choose_postprocessing(task, split, results, run_dir, *, remaining_seconds, o
     if plan['accepted']:
         prediction, probability = apply_postprocessing(test_predictions,
             test_probabilities if task.task_type == 'classification' else None,
-            classes, plan['weights'], plan['class_multipliers'], task.task_type)
+            classes, plan['weights'], plan['class_multipliers'], task.task_type,
+            binary_threshold=plan.get('binary_threshold'), positive_class=plan.get('positive_class'))
         from .worker import _atomic_csv, _atomic_json, _atomic_npy, _json_value
         path = Path(run_dir)/'postprocessed_test_predictions.csv'
         _atomic_csv(pd.DataFrame({task.target:prediction}), path)

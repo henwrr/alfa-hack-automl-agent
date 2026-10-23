@@ -763,7 +763,8 @@ class ResearchRun:
                      'iteration_override':result.model_details.get('training',{}).get('final_iterations')})
                 weights.append(weight)
             manifest.update(mode='finalize_ensemble', members=members, weights=weights,
-                            class_multipliers=plan['class_multipliers'])
+                            class_multipliers=plan['class_multipliers'],
+                            binary_threshold=plan.get('binary_threshold'), positive_class=plan.get('positive_class'))
         atomic_write_json(directory / "manifest.json", manifest)
         self.journal.append("final_fit_started", trial_id=best.trial_id, artifact_dir=str(directory), reserve_plan=self.reserve_plan, timeout_seconds=max(0.1, self.budget.remaining() - write_margin))
         self.checkpoint()

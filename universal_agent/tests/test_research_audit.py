@@ -167,6 +167,20 @@ def test_actual_nested_postprocessing_plan_projects_scores_and_multiplier_axis(t
     assert '0.67' in text and 'rare' in text
 
 
+def test_binary_threshold_and_positive_class_are_visible_in_compact_audit(tmp_path):
+    journal = AuditJournal(tmp_path / 'events.jsonl', echo=False)
+    journal.append('postprocessing_selected', plan={
+        'accepted': True, 'member_trial_ids': ['trial_1'], 'weights': [1.],
+        'binary_threshold': 0., 'positive_class': 'alert',
+        'baseline_score': .2, 'assessed_score': .5, 'calibrated_oof_score': .6,
+    })
+    projected = _records(tmp_path / 'decisions.jsonl')[0]['details']
+    assert projected['binary_threshold'] == 0.
+    assert projected['positive_class'] == 'alert'
+    text = (tmp_path / 'agent.log').read_text()
+    assert 'порог' in text and 'alert' in text
+
+
 def test_family_comparison_log_does_not_dump_fold_training_payload(tmp_path):
     journal=AuditJournal(tmp_path/'events.jsonl',echo=False)
     journal.append('family_comparison_completed',comparison={'selected_trial':'trial_1','metric':'rmse',

@@ -82,6 +82,43 @@ def _class_index(label: Any, classes: Sequence[Any]) -> int:
     raise ValueError(f"Prediction contains a class absent from classes: {label!r}.")
 
 
+def _positive_label(classes: Sequence[Any], declared: Any = None) -> Any:
+    if len(classes) != 2 or _same_label(classes[0], classes[1]):
+        raise ValueError("A binary decision requires exactly two classes.")
+    if declared is not None:
+        return classes[_class_index(declared, classes)]
+    for label in classes:
+        if _same_label(label, 1):
+            return label
+    try:
+        return sorted(classes)[-1]
+    except TypeError:
+        return classes[-1]
+
+
+def binary_threshold_labels(
+    probabilities: np.ndarray, classes: Sequence[Any], threshold: float, positive_class: Any,
+) -> np.ndarray:
+    """Decide labels with >= cutoff while leaving probabilities unchanged."""
+    if isinstance(threshold, (bool, np.bool_)) or not isinstance(threshold, (int, float, np.integer, np.floating)):
+        raise ValueError("binary_threshold must be a finite number in [0, 1].")
+    if not math.isfinite(threshold) or not 0 <= threshold <= 1:
+        raise ValueError("binary_threshold must be a finite number in [0, 1].")
+    positive = _class_index(_positive_label(classes, positive_class), classes)
+    probabilities = np.asarray(probabilities, dtype=float)
+    if probabilities.ndim != 2 or probabilities.shape[1] != 2:
+        raise ValueError("A binary threshold requires two probability columns.")
+    if not np.isfinite(probabilities).all() or (probabilities < 0).any() or (probabilities > 1).any():
+        raise ValueError("Binary probabilities must be finite and in [0, 1].")
+    indices = np.where(probabilities[:, positive] >= threshold, positive, 1 - positive)
+    axis = np.asarray(classes)
+    if any(not _same_label(value, label) for value, label in zip(axis, classes, strict=True)):
+        # Keep numeric arrays for sklearn scorers, but never coerce mixed
+        # labels such as [0, 'yes'] into different class identities.
+        axis = np.asarray(classes, dtype=object)
+    return axis[indices]
+
+
 def _encode_labels(values: np.ndarray, classes: Sequence[Any]) -> np.ndarray:
     """Vectorize label-to-class encoding for the hot Macro F1 search loop."""
     values = np.asarray(values)
@@ -223,6 +260,9 @@ def apply_postprocessing(
     weights: Sequence[float],
     class_multipliers: Sequence[float] | None,
     task_type: str,
+    *,
+    binary_threshold: float | None = None,
+    positive_class: Any = None,
 ) -> tuple[np.ndarray, np.ndarray | None]:
     """Apply a normalized weighted blend; return labels/values and probabilities."""
     if not predictions:
@@ -239,6 +279,8 @@ def apply_postprocessing(
     weight_values /= total_weight
 
     if task_type == "regression":
+        if binary_threshold is not None:
+            raise ValueError("binary_threshold is only valid for binary classification.")
         numeric = [np.asarray(value, dtype=float) for value in arrays]
         if any(not np.isfinite(value).all() for value in numeric):
             raise ValueError("Regression predictions must be finite.")
@@ -256,8 +298,15 @@ def apply_postprocessing(
         if blended.shape[0] != len(arrays[0]) or blended.shape[1] != len(class_values):
             raise ValueError("Probability rows/classes do not match predictions/classes.")
         adjusted = _apply_multiplier(blended, class_multipliers)
-        labels = np.asarray([class_values[index] for index in np.argmax(adjusted, axis=1)])
+        if binary_threshold is not None:
+            if class_multipliers is not None:
+                raise ValueError("A binary threshold cannot be combined with class_multipliers.")
+            labels = binary_threshold_labels(adjusted, class_values, binary_threshold, positive_class)
+        else:
+            labels = np.asarray([class_values[index] for index in np.argmax(adjusted, axis=1)])
         return labels, adjusted
+    if binary_threshold is not None:
+        raise ValueError("binary_threshold requires class probabilities.")
     if class_multipliers is not None:
         raise ValueError("class_multipliers require class probabilities.")
     return _weighted_vote(arrays, class_values, weight_values), None
@@ -269,6 +318,7 @@ def _score(
     probabilities: np.ndarray | None,
     classes: Sequence[Any],
     metric: str,
+    positive_class: Any = None,
 ) -> float | None:
     try:
         if metric in _REGRESSION_METRICS:
@@ -333,12 +383,7 @@ def _score(
             else:
                 if len(labels) != 2:
                     return None
-                positive = next((label for label in labels if _same_label(label, 1)), None)
-                if positive is None:
-                    try:
-                        positive = sorted(labels)[-1]
-                    except TypeError:
-                        positive = labels[-1]
+                positive = _positive_label(labels, positive_class)
                 value = float(f1_score(
                     y, predictions, average="binary", pos_label=positive, zero_division=0
                 ))
@@ -408,11 +453,13 @@ def _fit_meta(
     metric: str,
     maximize: bool,
     task_type: str,
-) -> tuple[list[float], list[float] | None, float | None]:
-    """Search weight grid first, then calibrate only its best Macro F1 blend."""
+    positive_class: Any = None,
+) -> tuple[list[float], list[float] | None, float | None, float | None]:
+    """Search weights first, then fit the selected blend's decision rule."""
     best_weights = [1.0] + [0.0] * (len(predictions) - 1)
     best_multipliers: list[float] | None = None
     best_score: float | None = None
+    threshold: float | None = None
 
     for weights_tuple in _weights_grid(len(predictions)):
         weights = list(weights_tuple)
@@ -425,7 +472,7 @@ def _fit_meta(
             labels, blended_probabilities = apply_postprocessing(
                 predictions, probabilities, classes, weights, None, task_type
             )
-            score = _score(y, labels, blended_probabilities, classes, metric)
+            score = _score(y, labels, blended_probabilities, classes, metric, positive_class)
         if _better(score, best_score, maximize):
             best_weights = weights
             best_multipliers = multipliers
@@ -444,7 +491,34 @@ def _fit_meta(
         best_multipliers, best_score = _tune_multipliers(
             y, blended_probabilities, classes, maximize
         )
-    return best_weights, best_multipliers, best_score
+    if task_type == "classification" and metric == "f1" and probabilities is not None and maximize:
+        blended = _blend_probabilities(probabilities, best_weights)
+        threshold, best_score = _tune_binary_threshold(y, blended, classes, positive_class, best_score)
+    return best_weights, best_multipliers, threshold, best_score
+
+
+def _tune_binary_threshold(y, probabilities, classes, positive_class, baseline_score):
+    """Exact O(n log n) binary F1 sweep; tied scores form indivisible groups.
+
+    The idea comes from ruzik_agent/decisions.py at 85f4988. This helper only
+    sees meta-training rows; the caller assesses it on excluded OOF folds.
+    With no positive training labels, no cutoff can improve binary F1.
+    """
+    positive = _positive_label(classes, positive_class)
+    truth = np.asarray([_same_label(label, positive) for label in y], dtype=bool)
+    if not truth.any():
+        return None, baseline_score
+    scores = probabilities[:, _class_index(positive, classes)]
+    order = np.argsort(-scores, kind="stable")
+    sorted_scores = scores[order]
+    ends = np.r_[np.flatnonzero(np.diff(sorted_scores) != 0), len(order) - 1]
+    true_positives = np.cumsum(truth[order], dtype=np.int64)[ends]
+    f1_values = 2.0 * true_positives / (int(truth.sum()) + ends + 1)
+    winner = int(np.argmax(f1_values))  # Prefer the highest cutoff on equal F1.
+    score = float(f1_values[winner])
+    if _better(score, baseline_score, True):
+        return float(sorted_scores[ends[winner]]), score
+    return None, baseline_score
 
 
 def _evaluate_rule(
@@ -456,11 +530,14 @@ def _evaluate_rule(
     multipliers: Sequence[float] | None,
     metric: str,
     task_type: str,
+    binary_threshold: float | None = None,
+    positive_class: Any = None,
 ) -> tuple[np.ndarray, np.ndarray | None, float | None]:
     values, adjusted_probabilities = apply_postprocessing(
-        predictions, probabilities, classes, weights, multipliers, task_type
+        predictions, probabilities, classes, weights, multipliers, task_type,
+        binary_threshold=binary_threshold, positive_class=positive_class,
     )
-    score = _score(y, values, adjusted_probabilities, classes, metric)
+    score = _score(y, values, adjusted_probabilities, classes, metric, positive_class)
     return values, adjusted_probabilities, score
 
 
@@ -577,23 +654,18 @@ def select_postprocessing(
         if not np.isfinite(y_values).all() or any(not np.isfinite(value).all() for value in model_predictions):
             raise ValueError("Regression targets and predictions must be finite.")
 
-    if metric_value == 'f1' and positive_class is not None and len(class_values) == 2:
-        positive_index = _class_index(positive_class, class_values)
-        axis = [1-positive_index, positive_index]
-        ordered = [class_values[i] for i in axis]
-        y_values = _encode_labels(y_values, ordered)
-        model_predictions = [_encode_labels(values, ordered) for values in model_predictions]
-        if (y_values < 0).any() or any((values < 0).any() for values in model_predictions):
+    binary_positive = None
+    if metric_value == 'f1':
+        binary_positive = _positive_label(class_values, positive_class)
+        if ((_encode_labels(y_values, class_values) < 0).any()
+                or any((_encode_labels(values, class_values) < 0).any() for values in model_predictions)):
             raise ValueError('Unknown class in binary F1 meta assessment')
-        if model_probabilities is not None:
-            model_probabilities = [p[:, axis] for p in model_probabilities]
-        class_values = [0, 1]
 
     unique_folds = _ordered_unique(folds)
     if len(unique_folds) < 2:
-        weights, multipliers, calibrated_score = _fit_meta(
+        weights, multipliers, threshold, calibrated_score = _fit_meta(
             y_values, model_predictions, model_probabilities, class_values,
-            metric_value, maximize, task_type,
+            metric_value, maximize, task_type, binary_positive,
         )
         baseline = _score(
             y_values,
@@ -601,12 +673,15 @@ def select_postprocessing(
             model_probabilities[0] if model_probabilities is not None else None,
             class_values,
             metric_value,
+            binary_positive,
         )
         warnings.append("Недостаточно OOF folds для независимой оценки: нужно минимум два; выбор не принят.")
         return {
             "accepted": False,
             "weights": [float(value) for value in weights],
             "class_multipliers": [float(value) for value in multipliers] if multipliers is not None else None,
+            "binary_threshold": threshold,
+            "positive_class": _json_value(binary_positive),
             "baseline_score": baseline,
             "assessed_score": None,
             "calibrated_oof_score": calibrated_score,
@@ -634,15 +709,15 @@ def select_postprocessing(
             continue
         fold_predictions_train = [value[train_rows] for value in model_predictions]
         fold_probabilities_train = _model_probabilities(model_probabilities, range(len(model_predictions)), train_rows)
-        weights, multipliers, _ = _fit_meta(
+        weights, multipliers, threshold, _ = _fit_meta(
             y_values[train_rows], fold_predictions_train, fold_probabilities_train,
-            class_values, metric_value, maximize, task_type,
+            class_values, metric_value, maximize, task_type, binary_positive,
         )
         fold_predictions_test = [value[test_rows] for value in model_predictions]
         fold_probabilities_test = _model_probabilities(model_probabilities, range(len(model_predictions)), test_rows)
         values, adjusted_probabilities, assessed_fold_score = _evaluate_rule(
             y_values[test_rows], fold_predictions_test, fold_probabilities_test,
-            class_values, weights, multipliers, metric_value, task_type,
+            class_values, weights, multipliers, metric_value, task_type, threshold, binary_positive,
         )
         heldout_outputs.append(np.asarray(values))
         if adjusted_probabilities is not None:
@@ -654,7 +729,7 @@ def select_postprocessing(
             baseline_values = fold_predictions_test[0]
             baseline_probabilities = fold_probabilities_test[0] if fold_probabilities_test is not None else None
         baseline_fold_score = _score(
-            y_values[test_rows], baseline_values, baseline_probabilities, class_values, metric_value
+            y_values[test_rows], baseline_values, baseline_probabilities, class_values, metric_value, binary_positive
         )
         heldout_indices.extend(test_rows.tolist())
         heldout_fold_rows.append({
@@ -663,6 +738,7 @@ def select_postprocessing(
             "rows": int(len(test_rows)),
             "baseline_score": baseline_fold_score,
             "assessed_score": assessed_fold_score,
+            "binary_threshold": threshold,
         })
 
     if not heldout_indices:
@@ -690,6 +766,7 @@ def select_postprocessing(
         heldout_probabilities[0] if heldout_probabilities is not None else None,
         class_values,
         metric_value,
+        binary_positive,
     )
     cross_fitted_values = np.concatenate(heldout_outputs)
     cross_fitted_probabilities = (
@@ -698,12 +775,12 @@ def select_postprocessing(
     )
     assessed_score = _score(
         y_values[all_heldout], cross_fitted_values, cross_fitted_probabilities,
-        class_values, metric_value,
+        class_values, metric_value, binary_positive,
     )
 
-    final_weights, final_multipliers, calibrated_score = _fit_meta(
+    final_weights, final_multipliers, final_threshold, calibrated_score = _fit_meta(
         y_values, model_predictions, model_probabilities, class_values,
-        metric_value, maximize, task_type,
+        metric_value, maximize, task_type, binary_positive,
     )
     accepted = _better(assessed_score, baseline_score, maximize)
     if assessed_score is None or baseline_score is None:
@@ -715,6 +792,8 @@ def select_postprocessing(
         "accepted": bool(accepted),
         "weights": [float(value) for value in final_weights],
         "class_multipliers": [float(value) for value in final_multipliers] if final_multipliers is not None else None,
+        "binary_threshold": final_threshold,
+        "positive_class": _json_value(binary_positive),
         "baseline_score": baseline_score,
         "assessed_score": assessed_score,
         "calibrated_oof_score": calibrated_score,

@@ -524,6 +524,11 @@ def _project_postprocessing(payload: dict) -> dict:
     weights = payload.get("weights")
     if isinstance(weights, (list, tuple)):
         result["weights"] = [number for item in weights[:3] if (number := _public_number(item)) is not None]
+    threshold = _public_number(payload.get('binary_threshold'))
+    if threshold is not None and 0 <= threshold <= 1:
+        result['binary_threshold'] = threshold
+        if (label := _public_label(payload.get('positive_class'))) is not None:
+            result['positive_class'] = label
     multipliers = payload.get("class_multipliers")
     if isinstance(multipliers, dict):
         compact = {}
@@ -849,6 +854,10 @@ def _event_text(event: str, details: dict) -> str:
             text += f"; веса={_human_value(details['weights'])}"
         if details.get("class_multipliers"):
             text += f"; множители классов={_human_value(details['class_multipliers'])}"
+        if 'binary_threshold' in details:
+            text += f"; бинарный порог={_human_value(details['binary_threshold'])}"
+            if 'positive_class' in details:
+                text += f"; положительный класс={_human_value(details['positive_class'])}"
         scores = []
         for key, label in (("baseline_score", "baseline"), ("assessed_score", "оценка"),
                            ("calibrated_oof_score", "OOF calibration")):
