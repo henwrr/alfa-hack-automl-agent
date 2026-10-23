@@ -27,7 +27,7 @@ def test_cv_research_fits_two_edits_and_refits_selected_configuration(tmp_path, 
         for recipe in recipes:
             if recipe['family']=='CatBoost':recipe['parameters']['iterations']=20
             elif recipe['family'] in {'LightGBM','XGBoost'}:recipe['parameters']['n_estimators']=20
-            else:recipe['parameters']['n_estimators']=10
+            elif recipe['family']=='ExtraTrees':recipe['parameters']['n_estimators']=10
             if recipe.get('fit_options',{}).get('early_stopping_rounds'):recipe['fit_options']['early_stopping_rounds']=3
         return recipes
     monkeypatch.setattr('automl_agent.recipes.initial_research_recipes',cheap)

@@ -34,7 +34,7 @@ from automl_agent.tools import validate_candidate_code
             "classification",
             {"C": 0.5, "max_iter": 300, "solver": "saga", "class_weight": None},
         ),
-        ("Linear", "regression", {}),
+        ("Linear", "regression", {"alpha": 1.0}),
     ],
 )
 def test_default_recipes_are_normalized_json(family, task_type, expected):

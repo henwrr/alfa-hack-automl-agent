@@ -88,7 +88,7 @@ def _default_parameters(family, task_type):
         return parameters
     if task_type == "classification":
         return {"C": 0.5, "max_iter": 300, "solver": "saga", "class_weight": None}
-    return {}
+    return {"alpha": 1.0}
 
 
 def default_recipe(family, task_type):
@@ -271,6 +271,8 @@ def _normalize_parameter(family, task_type, name, value):
                 if value not in (None, "balanced"):
                     raise ValueError("Linear class_weight must be None or 'balanced'.")
                 return value
+        elif name == "alpha":
+            return _number(name, value, 0, 10000, exclusive_minimum=True)
 
     raise ValueError(f"Unknown or unsupported {family} recipe parameter {name!r} for {task_type}.")
 
@@ -501,21 +503,16 @@ def initial_research_recipes(task_type, available_packages):
             )
         )
 
-    any_booster = False
-    if _profile_package_available(packages, "catboost"):
-        add("CatBoost", {"iterations": 3000, "learning_rate": 0.05, "depth": 6}, 100)
-        any_booster = True
     if _profile_package_available(packages, "lightgbm"):
         add("LightGBM", {"n_estimators": 5000, "learning_rate": 0.05, "num_leaves": 31}, 100)
-        any_booster = True
-
+    # A cheap, regularized linear baseline should consume an early trial even
+    # when one or more tree packages are installed.
+    add("Linear")
     add("ExtraTrees")
-
     if _profile_package_available(packages, "xgboost"):
         add("XGBoost", {"n_estimators": 3000, "learning_rate": 0.05, "max_depth": 6}, 100)
-        any_booster = True
-    if not any_booster:
-        add("Linear")
+    if _profile_package_available(packages, "catboost"):
+        add("CatBoost", {"iterations": 3000, "learning_rate": 0.05, "depth": 6}, 100)
     return candidates
 
 
@@ -576,7 +573,12 @@ def recipe_catalog(task_type):
             },
             "preprocessing": {"add_missing_indicators": {"type": "boolean", "default": False}},
         }
-        families_catalog["Linear"] = {"parameters": {}, "preprocessing": {"add_missing_indicators": {"type": "boolean", "default": False}}}
+        families_catalog["Linear"] = {
+            "parameters": {
+                "alpha": {"type": "number", "exclusive_minimum": 0, "maximum": 10000, "default": 1.0}
+            },
+            "preprocessing": {"add_missing_indicators": {"type": "boolean", "default": False}},
+        }
 
     boosting_catalog = {
         "LightGBM": {

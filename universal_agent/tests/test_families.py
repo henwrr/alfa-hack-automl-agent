@@ -129,7 +129,10 @@ def test_each_available_family_fits_predicts_and_round_trips(task_type, tmp_path
                 "n_jobs": 2,
             })
             params = model.get_params(deep=True)
-            assert any(value == 2 for key, value in params.items() if key.endswith("n_jobs") or key.endswith("thread_count"))
+            if candidate["family"] == "Linear" and task_type == "regression":
+                assert params["model__alpha"] == 1.0
+            else:
+                assert any(value == 2 for key, value in params.items() if key.endswith("n_jobs") or key.endswith("thread_count"))
             model.fit(X, y)
             prediction = model.predict(validation)
             assert len(prediction) == len(validation)

@@ -46,7 +46,10 @@ def test_initial_recipes_include_strong_available_cpu_candidates_and_linear_back
         _packages(catboost="1.2.8", lightgbm="4.6.0", xgboost="2.1.4"),
     )
 
-    assert set(available) == {"CatBoost", "LightGBM", "ExtraTrees", "XGBoost"}
+    assert set(available) == {"CatBoost", "LightGBM", "ExtraTrees", "XGBoost", "Linear"}
+    assert [recipe["family"] for recipe in recipes.initial_research_recipes(
+        "classification", _packages(catboost="1.2.8", lightgbm="4.6.0", xgboost="2.1.4")
+    )] == ["LightGBM", "Linear", "ExtraTrees", "XGBoost", "CatBoost"]
     catboost = available["CatBoost"]
     assert catboost["parameters"]["iterations"] == 3000
     assert catboost["parameters"]["learning_rate"] == 0.05
@@ -66,6 +69,7 @@ def test_initial_recipes_include_strong_available_cpu_candidates_and_linear_back
     assert xgboost["parameters"]["max_depth"] == 6
     assert xgboost["fit_options"]["early_stopping_rounds"] == 100
     assert all("fit_options" in recipe for recipe in available.values())
+    assert available["Linear"]["parameters"]["C"] == 0.5
 
     no_boosters = _initial_by_family(
         "regression",

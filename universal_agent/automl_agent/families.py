@@ -152,7 +152,7 @@ def _source(default_n_jobs, model_family):
         from scipy.sparse import csr_matrix
         from sklearn.compose import ColumnTransformer
         from sklearn.impute import SimpleImputer
-        from sklearn.linear_model import LinearRegression, LogisticRegression
+        from sklearn.linear_model import LogisticRegression, Ridge
         from sklearn.pipeline import Pipeline
         from sklearn.preprocessing import FunctionTransformer, OneHotEncoder, StandardScaler
 
@@ -212,7 +212,7 @@ def _source(default_n_jobs, model_family):
                     class_weight=None,
                 )
             else:
-                estimator = LinearRegression(n_jobs=_threads(context))
+                estimator = Ridge(alpha=1.0)
             return Pipeline([("preprocess", preprocess), ("model", estimator)])
     ''')
 
