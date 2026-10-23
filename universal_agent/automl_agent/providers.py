@@ -51,6 +51,7 @@ class _HTTPProvider:
         self.retries = retries
         self.extra_body = dict(extra_body or {})
         self.ollama = ollama
+        self._cancel_event = threading.Event()
         if ollama:
             if self.base_url.endswith("/v1"):
                 self.base_url = self.base_url[:-3]
@@ -72,6 +73,9 @@ class _HTTPProvider:
             raise ValueError("max_tokens must be a positive integer")
         if not isinstance(messages, list) or not isinstance(tools, list):
             raise TypeError("messages and tools must be lists")
+        # A provider instance services one model call at a time. Reset the
+        # cancellation signal before creating that call's event loop task.
+        self._cancel_event.clear()
         coroutine = self._complete_async(messages, tools, float(timeout), max_tokens)
         try:
             asyncio.get_running_loop()
@@ -95,7 +99,37 @@ class _HTTPProvider:
         except TimeoutError:
             raise ProviderError("provider request timed out", code="timeout", retryable=True) from None
 
+    def cancel_pending(self) -> None:
+        """Cancel the active HTTP request, if any, without changing complete()'s API."""
+        self._cancel_event.set()
+
     async def _complete_async(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        timeout: float,
+        max_tokens: int,
+    ) -> ModelResponse:
+        if self._cancel_event.is_set():
+            raise ProviderError("provider request cancelled", code="cancelled", retryable=False)
+        task = asyncio.create_task(self._complete_request(messages, tools, timeout, max_tokens))
+        try:
+            while True:
+                if self._cancel_event.is_set():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                    raise ProviderError("provider request cancelled", code="cancelled", retryable=False)
+                done, _ = await asyncio.wait({task}, timeout=0.05)
+                if done:
+                    return task.result()
+        except asyncio.CancelledError:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            if self._cancel_event.is_set():
+                raise ProviderError("provider request cancelled", code="cancelled", retryable=False) from None
+            raise
+
+    async def _complete_request(
         self,
         messages: list[dict],
         tools: list[dict],

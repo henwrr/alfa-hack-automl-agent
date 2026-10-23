@@ -25,12 +25,11 @@ In decision give concise public Russian explanations: model_family, observations
 """
 
 
-RECIPE_SYSTEM_PROMPT = """You are a tabular ML researcher. Host owns the fixed validation split, independent metric and best-model selection. Never invent scores or claim improvement before measurement. Test targets are placeholders; no validation labels are available to you.
-Use run_model_experiments with experiments:[{hypothesis,base_trial_id,parameters,preprocessing,fit_options,decision},...] to test edits to successful measured recipes. Send two independent focused hypotheses when runtime.parallel_trials=2 and two trial slots remain. experiments must be a native JSON array, never a JSON-encoded string. Prefer minimal calls containing hypothesis, base_trial_id and only changed fields. Decision metadata is optional; omit it to focus on executable changes. The host preserves tested preprocessing, compiles complete code and trains candidates with context.n_jobs CPU threads. Use model_catalog for supported parameters/ranges. Do not send Python code in recipe mode. Each experiment must actually change a parameter or preprocessing option. Duplicate configurations are rejected even if the hypothesis text changes. You can research generic new features with preprocessing.feature_ops: an ordered array of operations from model_catalog.feature_ops. Example: {"feature_ops":[{"op":"log1p","cols":["observed_numeric_feature"]},{"op":"ratio","pairs":[["numerator_feature","denominator_feature"]]}]}. Use real profile feature names; learn group/frequency/bin statistics only through these fit-only operations. A new feature_ops array replaces the entire inherited array. Propose feature hypotheses as well as parameter tuning when diagnostics support them.
-Select the base by its measured metric, runtime and actual model_details.parameters. Omitted parameters inherit the base, including CatBoost's measured automatic learning_rate. Change one factor at a time or explain an interaction. Do not silently replace a strong native learning rate with a familiar small constant. More iterations and a much lower rate can underfit; one worse validation score alone does not prove overfitting. For boosting use fit_options.early_stopping_rounds: the host creates a separate train-only inner eval_set and refits each outer train fold using the selected number of trees. OOF labels never enter fitting or early stopping. Constructor sample_weight is invalid; fit_options.sample_weight supports balanced or sqrt_balanced row weights for CLASSIFICATION ONLY. Never combine row and constructor class weights.
-For imbalanced classification and macro_f1, prioritize an untested comparison of CatBoost auto_class_weights="Balanced" and "SqrtBalanced" against the same measured unweighted base, retaining learning_rate/iterations. For ExtraTrees/Linear use class_weight="balanced". For LightGBM/XGBoost use fit_options.sample_weight="balanced" or "sqrt_balanced"; avoid double weighting. These are real training weights. class_weights="Balanced" and constructor sample_weight are invalid; y_train is not in context. Do not retry the same failed recipe under a new name.
-For regression with missing numeric data, consider one controlled add_missing_indicators=true study on ExtraTrees/Linear. CatBoost handles missing values natively. For bounded trees compare capacity (max_leaf_nodes/min_samples_leaf) with the current winning values before making trees even smaller. Respect measured process times and remaining time; do not assume linear scaling guarantees completion. Try fewer substantial, independent changes rather than many contradictory parameter changes.
-Put a concise observed motivation in hypothesis. Omit optional decision metadata unless it adds essential evidence. A feature hypothesis must include preprocessing.feature_ops; a weighting hypothesis must include fit_options.sample_weight or a supported constructor weight. Hypothesis text alone changes nothing. Distinguish observed facts from expectations; do not supply private internal reasoning. hypothesis and finish reason must be Russian. Use available research time for evidence-driven experiments rather than finishing after the first successful edit. Inspect validation_plan, dataset_diagnostics, per-class confusion/errors, regression segments and feature importance; explain which observed error motivates each edit. Feature importance is associative, not causal. Continue proposing measured experiments until the reserved deadline; stop only when the host reports that the reserve is reached or remaining time cannot fit another measured experiment. With temporal CV, treat earlier-period scores as transfer estimates, not iid performance. Host OOF blending and Macro F1 calibration are evaluated separately after research. Return native tool calls or exact JSON {"tool":"run_model_experiments","arguments":{"experiments":[...]}}.
+RECIPE_SYSTEM_PROMPT = """You are a tabular ML researcher. The host owns validation, scoring and best-model selection. Validation labels are hidden; test targets are placeholders. Never invent results.
+Use run_model_experiments with a native JSON array of {hypothesis,base_trial_id,parameters,preprocessing,fit_options,decision}. Return up to runtime.proposal_batch_size independent candidates, even when runtime.parallel_trials=1: proposal_batch_size is the proposal limit; parallel_trials is the simultaneous local-worker limit. Prefer two distinct candidates when slots remain. The host queues proposals and trains with context.n_jobs CPU threads. Do not assume companion results. Return tool calls or exact JSON {"tool":"run_model_experiments","arguments":{"experiments":[...]}}; no Python code.
+Edit successful measured bases only. Choose using metric, runtime and actual model_details.parameters. Omitted fields inherit the measured recipe, including CatBoost's actual learning_rate. Include only changed fields; every candidate must change configuration. Duplicates are rejected and base_trial_id fixes the family. Use model_catalog for valid parameters/ranges and real task.feature_columns names. preprocessing.feature_ops is an ordered replacement array; learned statistics fit on training folds only.
+Write concise Russian hypotheses from observed evidence; separate facts from untested expectations and omit private reasoning. Inspect validation plan, diagnostics, per-class/confusion errors, regression segments and feature importance (associative, not causal). Add features when evidence supports them. Never rename and retry a failed recipe.
+For boosting, fit_options.early_stopping_rounds uses a host-created train-only split; outer folds refit at its selected tree count. OOF labels never enter fitting. Classification may use one supported weighting method: fit_options.sample_weight for LightGBM/XGBoost; class_weight for ExtraTrees/Linear; auto_class_weights for CatBoost. Never combine row and constructor weights; class_weights, constructor sample_weight and y_train are invalid. For imbalanced macro_f1, compare weights with the unweighted base while keeping its learning rate and tree cap. Regression must not use class weights. CatBoost handles missing values; test ExtraTrees/Linear missing indicators only when numeric missingness supports it. Compare bounded tree capacity with measured values. More iterations and much lower learning_rate can underfit; one worse score does not prove overfitting. Respect measured runtimes. Continue proposing measured experiments until the reserved deadline; stop only at reserve or when no experiment fits. Temporal CV scores estimate transfer. Host evaluates OOF blending and Macro F1 calibration separately.
 """
 
 
@@ -321,12 +320,16 @@ def _recipe_profile_context(profile, level):
     return facts
 
 
-def _recipe_task_context(task, runtime_context, level):
+def _recipe_task_context(task, runtime_context, level, compact=False):
     task_data = task.model_context(runtime_context.get("n_jobs", 4))
     feature_columns = task_data.get("feature_columns", [])
     categorical = task_data.get("categorical_columns", [])
     feature_cap = (200, 80, 40, 20, 0, 0)[min(level, 5)]
     category_cap = (40, 24, 16, 10, 0, 0)[min(level, 5)]
+    if compact:
+        # Keep useful names for feature_ops while bounding large public schemas.
+        feature_cap = 100 if len(feature_columns) > 100 else len(feature_columns)
+        category_cap = min(24, len(categorical))
     task_data["feature_count"] = len(feature_columns)
     task_data["categorical_count"] = len(categorical)
     if len(feature_columns) > feature_cap:
@@ -340,11 +343,25 @@ def _recipe_task_context(task, runtime_context, level):
 
 def _build_recipe_messages(task, profile, results, best, runtime_context, feedback, context_chars, compact):
     """Construct a bounded, recipe-only prompt without changing the code-mode path."""
-    limit = max(12000, context_chars // 2) if compact else max(12000, context_chars)
+    if compact:
+        diagnostic_rows = [len(result.diagnostics.get("per_class") or [])
+                           for result in results if isinstance(result.diagnostics, dict)]
+        compact_target = 12000 if max(diagnostic_rows, default=0) > 20 else 9000
+        limit = max(5000, min(compact_target, context_chars // 2))
+    else:
+        limit = max(12000, context_chars)
     latest = results[-1] if results else None
     ledger_results = list(results[-12:])
     if best is not None and not any(result.trial_id == best.trial_id for result in ledger_results):
         ledger_results.insert(0, best)
+    if compact:
+        selected_ids = set()
+        for result in (best, latest, *results[-1:]):
+            if result is not None:
+                selected_ids.add(result.trial_id)
+        ledger_results = [row for row in results if row.trial_id in selected_ids]
+        if best is not None and not any(row.trial_id == best.trial_id for row in ledger_results):
+            ledger_results.insert(0, best)
     description = task.description or ""
     catalog = _recipe_catalog_context(task.task_type, profile, results, task.maximize)
     constraints = (
@@ -361,7 +378,8 @@ def _build_recipe_messages(task, profile, results, best, runtime_context, feedba
     }
 
     def make_content(level):
-        description_limit = (9000, 6500, 4500, 3000, 1800, 500)[min(level, 5)]
+        description_limit = ((9000, 6500, 4500, 3000, 1800, 500) if not compact
+                             else (1800, 1400, 1000, 500, 350, 250))[min(level, 5)]
         description_value = _clip_text(description, description_limit)
         feedback_limit = (5000, 3500, 2200, 1400, 800, 400)[min(level, 5)] if compact else 5000
         hypothesis_limit = (450, 350, 260, 180, 100, 28)[min(level, 5)]
@@ -387,7 +405,7 @@ def _build_recipe_messages(task, profile, results, best, runtime_context, feedba
                 "diagnostics": _compact_recipe_diagnostics(result.diagnostics, level),
             }
             if include_error and result.error:
-                error_limit = (5000, 4000, 3200, 2600, 1600, 950)[min(level, 5)]
+                error_limit = (5000, 4000, 1200, 1000, 800, 600)[min(level, 5)] if compact else (5000, 4000, 3200, 2600, 1600, 950)[min(level, 5)]
                 detail["error"] = _clip_text(result.error, error_limit)
             return detail
 
@@ -418,7 +436,7 @@ def _build_recipe_messages(task, profile, results, best, runtime_context, feedba
         }
         content = {
             "task_description": description_value,
-            "task": _recipe_task_context(task, runtime_context, level),
+            "task": _recipe_task_context(task, runtime_context, level, compact),
             "data_profile": _recipe_profile_context(profile, level),
             "task_constraints": constraints,
             "model_catalog": catalog,
@@ -436,7 +454,7 @@ def _build_recipe_messages(task, profile, results, best, runtime_context, feedba
     # Start with informative context, then drop secondary details in fixed stages.
     content = None
     encoded = ""
-    for level in range(6):
+    for level in range(3 if compact else 0, 6):
         content = make_content(level)
         encoded = json.dumps(content, ensure_ascii=False, allow_nan=False, default=str)
         if len(encoded) <= limit:
@@ -454,7 +472,9 @@ def _build_recipe_messages(task, profile, results, best, runtime_context, feedba
                 recent = [best_history, *recent]
         core = {
             "task": {key: value for key, value in content["task"].items()
-                     if key in {"task_type", "metric", "target", "classes", "seed", "n_jobs", "feature_count", "categorical_count"}},
+            if key in {"task_type", "metric", "target", "classes", "positive_class", "feature_columns",
+                       "feature_columns_truncated", "categorical_columns", "seed", "n_jobs", "feature_count",
+                       "categorical_count"}},
             "task_constraints": content["task_constraints"],
             "data_profile": content["data_profile"],
             "model_catalog": _budget_catalog(catalog, keep_families, drop_defaults=False),
