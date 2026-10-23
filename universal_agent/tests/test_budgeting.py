@@ -50,7 +50,9 @@ def test_measured_best_uses_exact_ceiling_row_count_and_costs() -> None:
     assert plan["estimated_fit_seconds"] == pytest.approx(100 * (101 / 80) * plan["safety_factor"])
     assert plan["overhead_seconds"] > 0
     assert plan["reserve_seconds"] == pytest.approx(
-        plan["estimated_fit_seconds"] + plan["overhead_seconds"]
+        plan["estimated_fit_seconds"]
+        + plan["startup_guard_seconds"]
+        + plan["overhead_seconds"]
     )
     assert plan["source"] == "best"
     assert plan["selected_trial"] == "trial-7"
@@ -187,4 +189,4 @@ def test_cv_reserve_uses_one_measured_refit_not_all_five_folds():
                           model_details={'training':{'estimated_refit_seconds':100.}})
     plan=plan_finalization(total_seconds=3600,validation_fraction=.2,best=best,train_rows=1000)
     assert plan['estimated_fit_seconds']==150.
-    assert plan['reserve_seconds']==186.
+    assert plan['reserve_seconds']==194.

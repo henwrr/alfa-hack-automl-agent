@@ -54,8 +54,13 @@ def test_measured_refit_includes_worker_startup_and_serialization_guard():
 
     assert plan["estimated_fit_seconds"] == pytest.approx(2.96 * 1.5)
     assert plan["startup_guard_seconds"] >= 7
-    assert plan["required_seconds"] >= plan["estimated_fit_seconds"] + plan["startup_guard_seconds"]
-    assert 12 <= plan["reserve_seconds"] <= 15
+    assert plan["overhead_seconds"] == pytest.approx(5)
+    assert plan["required_seconds"] == pytest.approx(
+        plan["estimated_fit_seconds"]
+        + plan["startup_guard_seconds"]
+        + plan["overhead_seconds"]
+    )
+    assert plan["reserve_seconds"] == pytest.approx(plan["required_seconds"])
 
 
 def test_cv_refit_estimate_does_not_get_row_scaled_twice():
@@ -80,6 +85,11 @@ def test_full_fit_admission_is_strict_about_the_whole_required_window():
     )
 
     assert plan["required_seconds"] > plan["estimated_fit_seconds"]
+    assert plan["required_seconds"] == pytest.approx(
+        plan["estimated_fit_seconds"]
+        + plan["startup_guard_seconds"]
+        + plan["overhead_seconds"]
+    )
     assert can_start_final_fit(plan["required_seconds"], plan)
     assert not can_start_final_fit(plan["required_seconds"] - 0.001, plan)
     assert not can_start_final_fit(180, {**plan, "feasible": False})

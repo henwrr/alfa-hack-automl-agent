@@ -113,9 +113,9 @@ def plan_finalization(
     estimated_fit = measured_seconds * row_scale * _SAFETY_FACTOR
     # Reserve time for writing artifacts and the final result. Scale with the
     # run while retaining a small absolute minimum for short runs.
-    overhead = min(total, _OVERHEAD_CAP_SECONDS, max(_STARTUP_GUARD_SECONDS, total * 0.01))
-    startup_guard = min(overhead, _STARTUP_GUARD_SECONDS)
-    projected_cost = estimated_fit + overhead
+    overhead = min(total, _OVERHEAD_CAP_SECONDS, max(5.0, total * 0.01))
+    startup_guard = min(total, _STARTUP_GUARD_SECONDS)
+    projected_cost = estimated_fit + startup_guard + overhead
     reserve = min(total, max(minimum_finalization_reserve_seconds(total), projected_cost))
     return {
         "reserve_seconds": reserve,
