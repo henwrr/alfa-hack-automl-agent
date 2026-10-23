@@ -128,6 +128,21 @@ def test_requested_trial_cap_can_only_lower_adaptive_cap():
     assert cap > 0
 
 
+def test_stable_trial_cap_uses_total_budget_until_research_window_is_tight():
+    from automl_agent.budgeting import trial_time_cap
+
+    at_start = trial_time_cap(total_seconds=180, research_seconds=156, requested_cap=120)
+    later = trial_time_cap(total_seconds=180, research_seconds=90, requested_cap=120)
+    near_cutoff = trial_time_cap(total_seconds=180, research_seconds=20, requested_cap=120)
+    at_cutoff = trial_time_cap(total_seconds=180, research_seconds=1.99, requested_cap=120)
+    long_run = trial_time_cap(total_seconds=10_800, research_seconds=10_740, requested_cap=2_000)
+
+    assert at_start == later == 30
+    assert near_cutoff == 18
+    assert at_cutoff == 0
+    assert long_run == 1_800
+
+
 @pytest.mark.parametrize("remaining", [0, -1, float("nan"), float("inf")])
 def test_final_fit_admission_rejects_invalid_remaining_time(remaining):
     from automl_agent.budgeting import can_start_final_fit

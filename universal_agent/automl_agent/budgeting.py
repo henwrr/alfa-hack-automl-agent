@@ -150,12 +150,12 @@ def can_start_final_fit(remaining_seconds: object, plan: dict) -> bool:
 def trial_time_cap(
     *, total_seconds: object, research_seconds: object, requested_cap: object | None = None
 ) -> float:
-    """Adapt a single trial's cap to the run and current research window."""
+    """Keep a stable total-budget cap until the remaining research window binds."""
     total = _total_budget(total_seconds)
     research = _finite_number(research_seconds, "research_seconds")
     if research < 0:
         raise ValueError("research_seconds must be nonnegative")
-    cap = min(max(30.0, total / 6.0), total / 4.0, research / 6.0)
+    cap = min(total / 6.0, max(0.0, research - 2.0))
     if requested_cap is not None:
         requested = _finite_number(requested_cap, "requested_cap")
         if requested <= 0:
