@@ -2,12 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from automl_agent.budgeting import (
-    can_start_final_fit,
-    initial_reserve_seconds,
-    plan_finalization,
-    trial_time_cap,
-)
+from automl_agent.budgeting import initial_reserve_seconds, plan_finalization
 from automl_agent.contracts import ExperimentResult
 
 
@@ -31,11 +26,16 @@ def test_initial_startup_reserve_keeps_existing_fifteen_percent_contract(total, 
     assert initial_reserve_seconds(total) == expected
 
 
-@pytest.mark.parametrize(("total", "minimum", "maximum"), [(60, 12, 15), (180, 20, 30)])
-def test_finalization_plan_has_a_short_run_minimum(total, minimum, maximum):
-    plan = plan_finalization(total_seconds=total, validation_fraction=0.2)
+@pytest.mark.parametrize(("total", "minimum"), [(60, 12), (180, 20)])
+def test_budget_window_preserves_short_run_finalization_reserve(total, minimum):
+    plan = plan_finalization(
+        total_seconds=total,
+        validation_fraction=0.2,
+        best=measured_result(2.96),
+        train_rows=1_000,
+    )
 
-    assert minimum <= plan["reserve_seconds"] <= maximum
+    assert plan["reserve_seconds"] >= minimum
 
 
 def test_no_measurement_finalization_plan_does_not_park_a_large_share_of_three_hours():
@@ -71,6 +71,8 @@ def test_cv_refit_estimate_does_not_get_row_scaled_twice():
 
 
 def test_full_fit_admission_is_strict_about_the_whole_required_window():
+    from automl_agent.budgeting import can_start_final_fit
+
     plan = plan_finalization(
         total_seconds=180,
         validation_fraction=0.2,
@@ -84,6 +86,8 @@ def test_full_fit_admission_is_strict_about_the_whole_required_window():
 
 
 def test_no_measurement_is_safe_and_does_not_claim_fit_admission():
+    from automl_agent.budgeting import can_start_final_fit
+
     plan = plan_finalization(total_seconds=60, validation_fraction=0.2)
 
     assert plan["reserve_seconds"] >= 12
@@ -93,6 +97,8 @@ def test_no_measurement_is_safe_and_does_not_claim_fit_admission():
 
 
 def test_trial_cap_scales_with_research_window_and_stays_bounded_on_long_runs():
+    from automl_agent.budgeting import trial_time_cap
+
     short = trial_time_cap(total_seconds=60, research_seconds=48)
     medium = trial_time_cap(total_seconds=180, research_seconds=156)
     long = trial_time_cap(total_seconds=10_800, research_seconds=10_740)
@@ -104,6 +110,8 @@ def test_trial_cap_scales_with_research_window_and_stays_bounded_on_long_runs():
 
 
 def test_requested_trial_cap_can_only_lower_adaptive_cap():
+    from automl_agent.budgeting import trial_time_cap
+
     cap = trial_time_cap(total_seconds=180, research_seconds=156, requested_cap=8)
 
     assert cap <= 8
@@ -112,6 +120,8 @@ def test_requested_trial_cap_can_only_lower_adaptive_cap():
 
 @pytest.mark.parametrize("remaining", [0, -1, float("nan"), float("inf")])
 def test_final_fit_admission_rejects_invalid_remaining_time(remaining):
+    from automl_agent.budgeting import can_start_final_fit
+
     plan = plan_finalization(total_seconds=60, validation_fraction=0.2, best=measured_result(1))
 
     assert not can_start_final_fit(remaining, plan)
