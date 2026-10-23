@@ -94,7 +94,7 @@ def test_feature_chain_uses_only_declared_fit_schema_and_is_deduplicated():
         **weighted,
         "preprocessing": proposal["preprocessing"],
     }
-    second_base = search.next_feature_or_weight_proposal(
+    assert search.next_feature_or_weight_proposal(
         [*results, _result(with_feature_ops, trial_id="trial_0003")],
         "classification",
         "macro_f1",
@@ -102,21 +102,63 @@ def test_feature_chain_uses_only_declared_fit_schema_and_is_deduplicated():
         ["kind"],
         seed=42,
         step=2,
-    )
-    assert second_base["base_trial_id"] == "trial_0001"
-    assert second_base["preprocessing"] == proposal["preprocessing"]
-    assert search.next_feature_or_weight_proposal(
-        [
-            *results,
-            _result(with_feature_ops, trial_id="trial_0003"),
-            _result({**base, "preprocessing": second_base["preprocessing"]}, trial_id="trial_0004"),
-        ],
-        "classification",
-        "macro_f1",
+    ) is None
+
+
+def test_one_feature_chain_attempt_exhausts_host_chain_across_multiple_measured_bases():
+    first = recipes.default_recipe("LightGBM", "regression")
+    second = recipes.default_recipe("ExtraTrees", "regression")
+    feature_attempt = {
+        **first,
+        "preprocessing": {"add_missing_indicators": False, "feature_ops": [
+            {"op": "freq_encode", "cols": ["kind"]},
+            {"op": "missing_flags", "cols": ["amount"]},
+        ]},
+    }
+
+    proposal = search.next_feature_or_weight_proposal(
+        [_result(first, 1.0), _result(second, 2.0)],
+        "regression",
+        "rmse",
         ["amount", "kind"],
         ["kind"],
         seed=42,
-        step=3,
+        step=0,
+    )
+    assert proposal["base_trial_id"] == "trial_0001"
+
+    # The failed/unfinished second baseline remains feature-free; the mere
+    # presence of this attempted chain still closes host feature search.
+    attempted = _result(feature_attempt, 0.9, trial_id="trial_0003")
+    attempted.status = "error"
+    assert search.next_feature_or_weight_proposal(
+        [_result(first, 1.0), _result(second, 2.0), attempted],
+        "regression",
+        "rmse",
+        ["amount", "kind"],
+        ["kind"],
+        seed=42,
+        step=1,
+    ) is None
+
+
+def test_llm_feature_ops_count_as_chain_explored_when_frequency_or_missing_flags_are_present():
+    base = recipes.default_recipe("ExtraTrees", "regression")
+    llm_feature_recipe = {
+        **base,
+        "preprocessing": {"add_missing_indicators": False, "feature_ops": [
+            {"op": "freq_encode", "cols": ["kind"]},
+        ]},
+    }
+
+    assert search.next_feature_or_weight_proposal(
+        [_result(base), _result(llm_feature_recipe, trial_id="trial_0002")],
+        "regression",
+        "rmse",
+        ["amount", "kind"],
+        ["kind"],
+        seed=42,
+        step=0,
     ) is None
 
 

@@ -109,6 +109,21 @@ def next_feature_or_weight_proposal(
                         ),
                     }
 
+    # Once this feature-chain family has been tried anywhere in the run,
+    # don't repeat it against another baseline. Failed trials count too:
+    # their recipes remain in the durable result list. LLM-proposed frequency
+    # encodings or missing flags count as the same exploration.
+    for result in results:
+        recipe = getattr(result, 'recipe', None)
+        preprocessing = recipe.get('preprocessing', {}) if isinstance(recipe, dict) else {}
+        feature_ops = preprocessing.get('feature_ops', []) if isinstance(preprocessing, dict) else []
+        if any(
+            isinstance(operation, dict)
+            and operation.get('op') in {'freq_encode', 'missing_flags'}
+            for operation in feature_ops
+        ):
+            return None
+
     columns = [c for c in feature_columns if isinstance(c, str) and c]
     categories = [c for c in categorical_columns if c in columns]
     numeric = [c for c in columns if c not in set(categories)]
