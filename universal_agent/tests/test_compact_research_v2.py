@@ -115,3 +115,53 @@ def test_cancel_pending_aborts_active_http_request(monkeypatch):
 
     assert caught.value.code == "cancelled"
     assert cancelled.wait(1), "cancellation did not reach the active HTTP coroutine"
+
+
+def test_oversized_prompt_keeps_compact_base_ids_and_proposal_budget():
+    task, profile, base, _ = _case()
+    task.feature_columns = [f"feature_{index:03}" for index in range(120)]
+    task.categorical_columns = task.feature_columns[:12]
+    task.description = "Long task description. " * 1200
+    profile["feature_count"] = 120
+    profile["categorical_columns"] = task.categorical_columns
+    profile["features"] = {
+        name: {"dtype": "float64", "missing_fraction": index / 500,
+               "unique": 100 + index, "numeric": True, "unused": "x" * 500}
+        for index, name in enumerate(task.feature_columns)
+    }
+    families = ["CatBoost", "ExtraTrees", "Linear", "LightGBM"]
+    recipes = [
+        {"family": "CatBoost", "parameters": {"iterations": 900, "learning_rate": 0.07},
+         "preprocessing": {"add_missing_indicators": False}, "fit_options": {"early_stopping_rounds": 80}},
+        {"family": "ExtraTrees", "parameters": {"n_estimators": 180, "max_leaf_nodes": 128},
+         "preprocessing": {"add_missing_indicators": False}},
+        {"family": "Linear", "parameters": {"C": 0.5, "max_iter": 300},
+         "preprocessing": {"add_missing_indicators": False}},
+        {"family": "LightGBM", "parameters": {"n_estimators": 500, "num_leaves": 31},
+         "preprocessing": {"add_missing_indicators": False}, "fit_options": {"early_stopping_rounds": 50}},
+    ]
+    results = []
+    for index, (family, recipe) in enumerate(zip(families, recipes), start=1):
+        result = ExperimentResult(
+            trial_id=f"trial_{index:04}", status="ok", artifact_dir="/missing", code_hash=family,
+            hypothesis=f"Tune {family}", metric=0.7 - index / 100, seconds=10 + index,
+            recipe=recipe,
+            model_details={"class": f"{family}Classifier", "parameters": {**recipe["parameters"],
+                           "measured_noise": "y" * 600}},
+        )
+        results.append(result)
+    results[0].metric = 0.9
+    messages = build_messages(
+        task, profile, results, results[0],
+        {"n_jobs": 1, "parallel_trials": 1, "proposal_batch_size": 2,
+         "experiment_mode": "recipe", "remaining_seconds": 300},
+        context_chars=16_000, compact=True,
+    )
+    content = json.loads(messages[1]["content"])
+    bases = content["model_catalog"]["measured_bases"]
+
+    assert {row["family"] for row in bases} == set(families)
+    assert {row["trial_id"] for row in bases} == {result.trial_id for result in results}
+    assert all("parameters" not in row and "recipe" not in row for row in bases)
+    assert content["best_experiment"]["recipe"] == results[0].recipe
+    assert content["runtime"]["proposal_batch_size"] == 2

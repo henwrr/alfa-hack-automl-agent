@@ -27,7 +27,7 @@ In decision give concise public Russian explanations: model_family, observations
 
 RECIPE_SYSTEM_PROMPT = """You are a tabular ML researcher. The host owns validation, scoring and best-model selection. Validation labels are hidden; test targets are placeholders. Never invent results.
 Use run_model_experiments with a native JSON array of {hypothesis,base_trial_id,parameters,preprocessing,fit_options,decision}. Return up to runtime.proposal_batch_size independent candidates, even when runtime.parallel_trials=1: proposal_batch_size is the proposal limit; parallel_trials is the simultaneous local-worker limit. Prefer two distinct candidates when slots remain. The host queues proposals and trains with context.n_jobs CPU threads. Do not assume companion results. Return tool calls or exact JSON {"tool":"run_model_experiments","arguments":{"experiments":[...]}}; no Python code.
-Edit successful measured bases only. Choose using metric, runtime and actual model_details.parameters. Omitted fields inherit the measured recipe, including CatBoost's actual learning_rate. Include only changed fields; every candidate must change configuration. Duplicates are rejected and base_trial_id fixes the family. Use model_catalog for valid parameters/ranges and real task.feature_columns names. preprocessing.feature_ops is an ordered replacement array; learned statistics fit on training folds only.
+Edit successful measured bases only. Choose using family metrics/runtime and actual parameters when shown. Omitted fields inherit the exact measured recipe, including CatBoost's actual learning_rate; include only changes. Duplicates are rejected and base_trial_id fixes the family. Use model_catalog for valid parameters/ranges and real task.feature_columns names. preprocessing.feature_ops is an ordered replacement array; learned statistics fit on training folds only.
 Write concise Russian hypotheses from observed evidence; separate facts from untested expectations and omit private reasoning. Inspect validation plan, diagnostics, per-class/confusion errors, regression segments and feature importance (associative, not causal). Add features when evidence supports them. Never rename and retry a failed recipe.
 For boosting, fit_options.early_stopping_rounds uses a host-created train-only split; outer folds refit at its selected tree count. OOF labels never enter fitting. Classification may use one supported weighting method: fit_options.sample_weight for LightGBM/XGBoost; class_weight for ExtraTrees/Linear; auto_class_weights for CatBoost. Never combine row and constructor weights; class_weights, constructor sample_weight and y_train are invalid. For imbalanced macro_f1, compare weights with the unweighted base while keeping its learning rate and tree cap. Regression must not use class weights. CatBoost handles missing values; test ExtraTrees/Linear missing indicators only when numeric missingness supports it. Compare bounded tree capacity with measured values. More iterations and much lower learning_rate can underfit; one worse score does not prove overfitting. Respect measured runtimes. Continue proposing measured experiments until the reserved deadline; stop only at reserve or when no experiment fits. Temporal CV scores estimate transfer. Host evaluates OOF blending and Macro F1 calibration separately.
 """
@@ -230,6 +230,16 @@ def _budget_catalog(catalog, keep_families, drop_defaults):
         if drop_defaults:
             schema.pop("default", None)
     return compact
+
+
+def _compact_measured_bases(catalog):
+    """Keep base IDs actionable without repeating full recipes and fit parameters."""
+    bases = catalog.get("measured_bases", [])
+    catalog["measured_bases"] = [
+        {key: row[key] for key in ("family", "trial_id", "metric") if key in row}
+        for row in bases if isinstance(row, dict)
+    ]
+    return catalog
 
 
 def _recipe_profile_context(profile, level):
@@ -477,13 +487,15 @@ def _build_recipe_messages(task, profile, results, best, runtime_context, feedba
                        "categorical_count"}},
             "task_constraints": content["task_constraints"],
             "data_profile": content["data_profile"],
-            "model_catalog": _budget_catalog(catalog, keep_families, drop_defaults=False),
+            "model_catalog": _compact_measured_bases(
+                _budget_catalog(catalog, keep_families, drop_defaults=False)
+            ),
             "best_experiment": content["best_experiment"],
             "latest_experiment": content["latest_experiment"],
             "experiments": recent,
             "family_comparison": content["family_comparison"],
             "last_failed_code": "",
-            "runtime": {key: runtime_context[key] for key in ("n_jobs", "parallel_trials", "experiment_mode", "remaining_seconds") if key in runtime_context},
+            "runtime": {key: runtime_context[key] for key in ("n_jobs", "parallel_trials", "proposal_batch_size", "experiment_mode", "remaining_seconds") if key in runtime_context},
         }
 
         def encode_core():
@@ -494,8 +506,9 @@ def _build_recipe_messages(task, profile, results, best, runtime_context, feedba
             # Trim optional context first. Keep a valid catalog for measured families,
             # the complete validation plan, exact best recipe/parameters and last error.
             core.pop("family_comparison", None)
-            core["model_catalog"] = _budget_catalog(catalog, keep_families, drop_defaults=True)
-            core["model_catalog"].pop("measured_bases", None)
+            core["model_catalog"] = _compact_measured_bases(
+                _budget_catalog(catalog, keep_families, drop_defaults=True)
+            )
             core["experiments"] = [
                 {key: row[key] for key in ("trial_id", "status", "metric") if key in row}
                 for row in recent
@@ -517,8 +530,9 @@ def _build_recipe_messages(task, profile, results, best, runtime_context, feedba
                 for row in recent[-4:]
             ]
             core.pop("family_comparison", None)
-            core["model_catalog"] = _budget_catalog(catalog, keep_families, drop_defaults=True)
-            core["model_catalog"].pop("measured_bases", None)
+            core["model_catalog"] = _compact_measured_bases(
+                _budget_catalog(catalog, keep_families, drop_defaults=True)
+            )
             core["data_profile"]["dataset_diagnostics"] = {
                 key: value for key, value in core["data_profile"].get("dataset_diagnostics", {}).items()
                 if key == "adversarial_cv"

@@ -8,6 +8,7 @@ import json
 import threading
 import uuid
 from concurrent.futures import Future
+from contextlib import contextmanager
 from typing import Any
 
 import httpx
@@ -22,6 +23,16 @@ class ProviderError(RuntimeError):
         super().__init__(message)
         self.code = code
         self.retryable = retryable
+
+
+class ProviderCancelToken:
+    """Request-scoped, thread-safe cancellation signal for one provider call."""
+
+    def __init__(self) -> None:
+        self.event = threading.Event()
+
+    def cancel(self) -> None:
+        self.event.set()
 
 
 class _HTTPProvider:
@@ -51,7 +62,10 @@ class _HTTPProvider:
         self.retries = retries
         self.extra_body = dict(extra_body or {})
         self.ollama = ollama
-        self._cancel_event = threading.Event()
+        self._legacy_cancel_event = threading.Event()
+        self._request_scope = threading.local()
+        self._active_lock = threading.Lock()
+        self._active_cancel_events: set[threading.Event] = set()
         if ollama:
             if self.base_url.endswith("/v1"):
                 self.base_url = self.base_url[:-3]
@@ -73,35 +87,67 @@ class _HTTPProvider:
             raise ValueError("max_tokens must be a positive integer")
         if not isinstance(messages, list) or not isinstance(tools, list):
             raise TypeError("messages and tools must be lists")
-        # A provider instance services one model call at a time. Reset the
-        # cancellation signal before creating that call's event loop task.
-        self._cancel_event.clear()
-        coroutine = self._complete_async(messages, tools, float(timeout), max_tokens)
+        scoped_token = getattr(self._request_scope, "token", None)
+        cancellation_event = scoped_token.event if scoped_token is not None else self._legacy_cancel_event
+        if scoped_token is None:
+            # Preserve the original direct-call contract: cancel_pending() is
+            # armed for an active call and reset when a new direct call begins.
+            cancellation_event.clear()
+        with self._active_lock:
+            self._active_cancel_events.add(cancellation_event)
         try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            return asyncio.run(coroutine)
-
-        # The public interface is synchronous. If called from an async host,
-        # run the request in a private event loop so we do not nest asyncio.run.
-        result: Future[ModelResponse] = Future()
-
-        def run_in_thread() -> None:
+            coroutine = self._complete_async(messages, tools, float(timeout), max_tokens, cancellation_event)
             try:
-                result.set_result(asyncio.run(coroutine))
-            except BaseException as exc:
-                result.set_exception(exc)
+                asyncio.get_running_loop()
+            except RuntimeError:
+                return asyncio.run(coroutine)
 
-        thread = threading.Thread(target=run_in_thread, name="automl-provider", daemon=True)
-        thread.start()
+            # The public interface is synchronous. If called from an async host,
+            # run the request in a private event loop so we do not nest asyncio.run.
+            result: Future[ModelResponse] = Future()
+
+            def run_in_thread() -> None:
+                try:
+                    result.set_result(asyncio.run(coroutine))
+                except BaseException as exc:
+                    result.set_exception(exc)
+
+            thread = threading.Thread(target=run_in_thread, name="automl-provider", daemon=True)
+            thread.start()
+            try:
+                return result.result(timeout=float(timeout) + 0.5)
+            except TimeoutError:
+                raise ProviderError("provider request timed out", code="timeout", retryable=True) from None
+        finally:
+            with self._active_lock:
+                self._active_cancel_events.discard(cancellation_event)
+
+    def new_cancel_token(self) -> ProviderCancelToken:
+        """Create a cancellation token before starting a request worker."""
+        return ProviderCancelToken()
+
+    @contextmanager
+    def request_scope(self, token: ProviderCancelToken):
+        """Bind a token to the existing complete() call in the current thread."""
+        if not isinstance(token, ProviderCancelToken):
+            raise TypeError("token must be created by new_cancel_token()")
+        previous = getattr(self._request_scope, "token", None)
+        self._request_scope.token = token
         try:
-            return result.result(timeout=float(timeout) + 0.5)
-        except TimeoutError:
-            raise ProviderError("provider request timed out", code="timeout", retryable=True) from None
+            yield token
+        finally:
+            if previous is None:
+                del self._request_scope.token
+            else:
+                self._request_scope.token = previous
 
     def cancel_pending(self) -> None:
-        """Cancel the active HTTP request, if any, without changing complete()'s API."""
-        self._cancel_event.set()
+        """Cancel all active calls, retaining compatibility with direct callers."""
+        self._legacy_cancel_event.set()
+        with self._active_lock:
+            active = tuple(self._active_cancel_events)
+        for event in active:
+            event.set()
 
     async def _complete_async(
         self,
@@ -109,13 +155,16 @@ class _HTTPProvider:
         tools: list[dict],
         timeout: float,
         max_tokens: int,
+        cancellation_event: threading.Event | None = None,
     ) -> ModelResponse:
-        if self._cancel_event.is_set():
+        if cancellation_event is None:
+            cancellation_event = self._legacy_cancel_event
+        if cancellation_event.is_set():
             raise ProviderError("provider request cancelled", code="cancelled", retryable=False)
         task = asyncio.create_task(self._complete_request(messages, tools, timeout, max_tokens))
         try:
             while True:
-                if self._cancel_event.is_set():
+                if cancellation_event.is_set():
                     task.cancel()
                     await asyncio.gather(task, return_exceptions=True)
                     raise ProviderError("provider request cancelled", code="cancelled", retryable=False)
@@ -125,7 +174,7 @@ class _HTTPProvider:
         except asyncio.CancelledError:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-            if self._cancel_event.is_set():
+            if cancellation_event.is_set():
                 raise ProviderError("provider request cancelled", code="cancelled", retryable=False) from None
             raise
 
