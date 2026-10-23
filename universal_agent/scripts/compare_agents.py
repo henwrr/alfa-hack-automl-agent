@@ -49,11 +49,11 @@ def digest_files(root, files=None):
     return checksum, digests
 
 
-def stage_sources(repo, directory, names):
+def stage_sources(repo, directory, names, *, pins=None):
     """Extract runtime code only; never extract datasets, .env or build outputs."""
     agents = []
     for name in names:
-        revision, prefix, package = PINS[name]
+        revision, prefix, package = (PINS if pins is None else pins)[name]
         prefix = prefix + "/" if prefix else ""
         paths = subprocess.check_output(["git", "ls-tree", "-r", "--name-only", revision], cwd=repo, text=True).splitlines()
         paths = [p for p in paths if p in {prefix + "solution.py", prefix + "requirements.txt", prefix + "requirements-mvp.txt"} or (
@@ -336,8 +336,16 @@ def main(argv=None):
     parser.add_argument("--supplemental-budget", type=int, default=60)
     parser.add_argument("--upstream", default="http://127.0.0.1:11434")
     parser.add_argument("--model", default="qwen3.5:9b")
+    parser.add_argument("--universal-ref", help="Explicit frozen Universal revision for before/after comparisons")
     parser.add_argument("--offline", action="store_true")
     args = parser.parse_args(argv)
+    pins = dict(PINS)
+    if args.universal_ref:
+        if 'universal' not in args.agents:
+            parser.error('--universal-ref requires universal in --agents')
+        revision = subprocess.check_output(['git', 'rev-parse', '--verify', args.universal_ref + '^{commit}'],
+                                           cwd=args.repo, text=True).strip()
+        pins['universal'] = (revision, *PINS['universal'][1:])
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from benchmark_data import prepare_cases
     workspace = args.workspace.resolve()
@@ -346,7 +354,7 @@ def main(argv=None):
               "supplemental_budget": args.supplemental_budget, "model": args.model, "offline": args.offline,
               "num_ctx": 16384, "num_predict": 2000, "think": False, "temperature": .2,
               "upstream": args.upstream, "agents": args.agents, "cases": args.cases,
-              "pins": {n: PINS[n][0] for n in args.agents}}
+              "pins": {n: pins[n][0] for n in args.agents}}
     try:
         with urllib.request.urlopen(args.upstream.rstrip('/') + '/api/tags', timeout=10) as response:
             models = json.load(response).get('models', [])
@@ -361,7 +369,7 @@ def main(argv=None):
     if previous is not None and previous != config:
         raise ValueError("Refusing to mix results from different benchmark configurations")
     write_json(workspace / "config.json", config)
-    agents = stage_sources(args.repo, workspace / "sources", args.agents)
+    agents = stage_sources(args.repo, workspace / "sources", args.agents, pins=pins)
     write_json(workspace / "sources.json", agents)
     cases = prepare_cases(args.data_root, workspace / "cases", seed=args.seed)
     if args.cases:

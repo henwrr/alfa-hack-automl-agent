@@ -180,3 +180,12 @@ def test_balanced_weight_is_not_proposed_for_non_f1_metrics_or_regression():
     )
     assert regression_proposal is None or "fit_options" not in regression_proposal
 
+
+
+def test_feature_chain_selects_the_best_r2_base_in_maximizing_direction():
+    first=recipes.default_recipe('LightGBM','regression')
+    second=recipes.default_recipe('ExtraTrees','regression')
+    proposal=search.next_feature_or_weight_proposal(
+        [_result(first,.2,'trial_0001'),_result(second,.8,'trial_0002')],
+        'regression','r2',['amount'],[],42,0)
+    assert proposal['base_trial_id']=='trial_0002'

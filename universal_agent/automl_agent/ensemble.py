@@ -38,13 +38,13 @@ def ensemble_shortlist(compatible):
 
 
 def choose_postprocessing_bounded(task, split, results, run_dir, *, remaining_seconds, overhead_seconds,
-                                  refit_seconds, memory_limit_mb=12000):
+                                  refit_seconds, memory_limit_mb=12000, startup_guard_seconds=0.):
     """Supervise meta-search separately so a slow search cannot consume refit time."""
     import sys
     from .journal import atomic_write_json
     from .runtime import run_process
     started = time.monotonic()
-    timeout = min(60., remaining_seconds - max(0., refit_seconds) - overhead_seconds)
+    timeout = min(60., remaining_seconds - max(0., refit_seconds) - startup_guard_seconds - overhead_seconds)
     if timeout < 1.:
         return {'accepted':False, 'reason':'insufficient_postprocessing_time'}
     directory = Path(run_dir).resolve()/'postprocessing_worker'
@@ -55,6 +55,7 @@ def choose_postprocessing_bounded(task, split, results, run_dir, *, remaining_se
     atomic_write_json(manifest_path, {'task':task.to_dict(), 'split':split,
         'results':[r.to_dict() for r in results], 'run_dir':str(Path(run_dir).resolve()),
         'remaining_seconds':remaining_seconds, 'overhead_seconds':overhead_seconds,
+        'startup_guard_seconds':startup_guard_seconds,
         'result_path':str(result_path)})
     process = run_process(argv=[sys.executable,'-m','automl_agent.ensemble','--manifest',str(manifest_path)],
         cwd=directory, timeout=timeout, n_jobs=1, memory_limit_mb=memory_limit_mb,
@@ -65,13 +66,13 @@ def choose_postprocessing_bounded(task, split, results, run_dir, *, remaining_se
                 'seconds':time.monotonic()-started, 'timeout_seconds':timeout}
     plan = json.loads(result_path.read_text())
     elapsed = time.monotonic()-started
-    if plan.get('accepted') and plan.get('estimated_fit_seconds', 0.) + overhead_seconds + elapsed >= remaining_seconds:
+    if plan.get('accepted') and plan.get('estimated_fit_seconds', 0.) + startup_guard_seconds + overhead_seconds + elapsed >= remaining_seconds:
         plan.update(accepted=False, reason='insufficient_refit_time')
     plan.update(seconds=elapsed, timeout_seconds=timeout)
     return plan
 
 
-def choose_postprocessing(task, split, results, run_dir, *, remaining_seconds, overhead_seconds):
+def choose_postprocessing(task, split, results, run_dir, *, remaining_seconds, overhead_seconds, startup_guard_seconds=0.):
     started = time.monotonic()
     if split.get('mode') != 'evaluate_cv':
         return {'accepted':False, 'reason':'legacy_holdout_has_no_oof'}
@@ -128,7 +129,7 @@ def choose_postprocessing(task, split, results, run_dir, *, remaining_seconds, o
     estimate = sum(usable[i].model_details.get('training',{}).get('estimated_refit_seconds') or usable[i].seconds for i in active)
     plan['estimated_fit_seconds'] = float(estimate*1.5)
     plan['reason'] = 'meta_improvement' if plan['accepted'] else 'no_meta_improvement'
-    if plan['accepted'] and estimate*1.5 + overhead_seconds + time.monotonic()-started >= remaining_seconds:
+    if plan['accepted'] and estimate*1.5 + startup_guard_seconds + overhead_seconds + time.monotonic()-started >= remaining_seconds:
         plan.update(accepted=False, reason='insufficient_refit_time')
         plan['warnings'].append('Недостаточно времени на полный refit всех участников; сохранена лучшая одиночная модель.')
     if plan['accepted']:
@@ -159,7 +160,8 @@ def main():
     manifest=json.loads(args.manifest.read_text())
     plan=choose_postprocessing(TaskSpec.from_dict(manifest['task']),manifest['split'],
         [ExperimentResult.from_dict(r) for r in manifest['results']],manifest['run_dir'],
-        remaining_seconds=manifest['remaining_seconds'],overhead_seconds=manifest['overhead_seconds'])
+        remaining_seconds=manifest['remaining_seconds'],overhead_seconds=manifest['overhead_seconds'],
+        startup_guard_seconds=manifest.get('startup_guard_seconds',0.))
     atomic_write_json(Path(manifest['result_path']),plan)
 
 

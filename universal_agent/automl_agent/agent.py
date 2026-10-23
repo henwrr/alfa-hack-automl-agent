@@ -340,7 +340,7 @@ class ResearchRun:
                 if isinstance(estimate, (int,float)) and estimate > 0:
                     costs.append(estimate)
             if costs:
-                projected = sum(costs)*1.5 + plan['overhead_seconds']
+                projected = sum(costs)*1.5 + plan['startup_guard_seconds'] + plan['overhead_seconds']
                 plan['potential_ensemble_fit_seconds'] = sum(costs)*1.5
                 plan['reserve_seconds'] = min(self.config.time_budget, max(plan['reserve_seconds'], projected))
         previous = getattr(self, 'reserve_plan', None)
@@ -356,7 +356,7 @@ class ResearchRun:
         if len(self.results) + len(self.active_trials) >= self.config.trial_limit:
             raise ValueError('Experiment budget exhausted')
         remaining = self.budget.research_remaining()
-        if remaining <= 0:
+        if remaining <= 2:
             raise ValueError('Research deadline reached; finalization time is reserved')
         code_hash = hashlib.sha256(code.encode()).hexdigest()
         if any(r.code_hash == code_hash and (recipe_hash is None or r.recipe_hash == recipe_hash)
@@ -368,7 +368,7 @@ class ResearchRun:
         (directory / 'code.py').write_text(code, encoding='utf-8')
         result = ExperimentResult(trial_id, 'error', str(directory), code_hash, hypothesis,
                                   is_baseline=is_baseline, decision=decision or {}, origin=origin, recipe=recipe, recipe_hash=recipe_hash, parent_trial_id=parent_trial_id)
-        recorded = self.journal.append('decision_recorded', trial_id=trial_id, source='harness' if is_baseline else 'llm',
+        recorded = self.journal.append('decision_recorded', trial_id=trial_id, source='harness' if is_baseline else origin,
                                        hypothesis=hypothesis, decision=result.decision, explanation_provided=bool(result.decision))
         result.decision = recorded['payload']['decision']
         result.hypothesis = recorded['payload']['hypothesis']
@@ -392,8 +392,11 @@ class ResearchRun:
             manifest.update(mode='evaluate_cv', cv_plan=self.split['cv_plan'], preflight=recipe is None)
             manifest['inputs'].pop('validation_features')
         atomic_write_json(directory / 'manifest.json', manifest)
+        from .budgeting import trial_time_cap
+        timeout = trial_time_cap(total_seconds=self.config.time_budget, research_seconds=remaining,
+                                 requested_cap=self.config.trial_timeout)
         return result, {'argv': [sys.executable, '-m', 'automl_agent.worker', '--manifest', str(directory / 'manifest.json')],
-                        'cwd': directory, 'timeout': min(self.config.trial_timeout, remaining), 'n_jobs': self.config.n_jobs,
+                        'cwd': directory, 'timeout': timeout, 'n_jobs': self.config.n_jobs,
                         'memory_limit_mb': self.config.memory_limit_mb, 'env': {'PYTHONPATH': str(Path(__file__).resolve().parent.parent)}}
 
     def _commit_trial(self, result, process=None):
@@ -495,8 +498,8 @@ class ResearchRun:
 
     def _llm_model_experiments(self, experiments, _source='llm'):
         from .recipes import normalize_recipe, recipe_code, recipe_fingerprint
-        if not 1 <= len(experiments) <= self.config.parallel_trials:
-            raise ValueError('Batch must contain 1 to parallel_trials independent candidates')
+        if not 1 <= len(experiments) <= 2:
+            raise ValueError('Batch must contain 1 or 2 independent candidates; workers execute the queue within resource limits')
         known = set()
         for prior in [*self.results, *self.active_trials.values()]:
             if prior.recipe:
@@ -578,8 +581,20 @@ class ResearchRun:
         proposed = proposed[:None if self.config.max_trials is None else max(0, self.config.max_trials - len(self.results))]
         self.journal.append('family_comparison_started', families=[p['family'] for p in candidates],
                             planned=len(proposed), limited_by_trial_budget=limited, split_fingerprint=self.split['split_fingerprint'])
-        if proposed and self.budget.research_remaining() > 0:
-            self.experiment_batch(proposed, is_baseline=True, origin='family')
+        warmup_started = self.budget.elapsed()
+        warmup_window = self.budget.research_remaining() * 0.5
+        for proposal in proposed:
+            if self.budget.research_remaining() <= 2:
+                break
+            if any(r.status == 'ok' and r.is_baseline for r in self.results) and self.budget.elapsed() - warmup_started >= warmup_window:
+                self.journal.append('family_comparison_deferred', family=proposal['family'], reason='preserve_research_window')
+                break
+            self.experiment_batch([proposal], is_baseline=True, origin='family')
+            # Time-first runs try the cheap host feature/weight chain before a
+            # costly later family. Explicit trial caps retain their LLM slots.
+            if (self.config.max_trials is None and not self.config.offline
+                    and self.budget.elapsed() - warmup_started < warmup_window):
+                self._host_feature_step()
         trials = [r for r in self.results if r.is_baseline]
         best = select_best(trials, self.task.maximize)
         comparison = {'split_fingerprint': self.split['split_fingerprint'], 'metric': self.task.metric,
@@ -592,8 +607,8 @@ class ResearchRun:
         self.journal.append('family_comparison_completed', comparison=comparison)
 
     def _llm_experiments(self, experiments):
-        if len(experiments) > self.config.parallel_trials:
-            raise ValueError('Batch size exceeds --parallel-trials; use run_experiment for one candidate')
+        if not 1 <= len(experiments) <= 2:
+            raise ValueError('Batch must contain 1 or 2 candidates; concurrency is controlled by the worker queue')
         results = self.experiment_batch(experiments)
         best = select_best(self.results, self.task.maximize)
         return {'trials': [({'trial_id': r.trial_id, 'status': r.status, 'metrics': r.metrics, 'error': r.error,
@@ -602,14 +617,74 @@ class ResearchRun:
 
     def bounded_search(self, limit):
         from .search import next_search_proposal
-        for step in range(limit):
+        for _ in range(limit):
             if len(self.results) >= self.config.trial_limit or self.budget.research_remaining() <= 2:
                 break
+            step = sum(r.origin == 'search' for r in self.results)
+            if self._host_feature_step():
+                continue
             proposal = next_search_proposal(self.results, self.task.task_type, self.task.maximize, self.config.seed, step)
             if proposal is None:
                 break
             self.journal.append('search_proposal', proposal=proposal, step=step)
             self._llm_model_experiments([proposal], _source='search')
+
+    def _host_feature_step(self):
+        from .search import next_feature_or_weight_proposal
+        proposal = next_feature_or_weight_proposal(
+            self.results, self.task.task_type, self.task.metric, self.task.feature_columns,
+            self.task.categorical_columns, self.config.seed, sum(r.origin == 'search' for r in self.results))
+        if proposal is None or self.budget.research_remaining() <= 2:
+            return False
+        self.journal.append('search_proposal', proposal=proposal, source='host_feature_chain')
+        before = len(self.results)
+        self._llm_model_experiments([proposal], _source='search')
+        return len(self.results) > before
+
+    def _complete_during_search(self, provider, messages, tools, *, timeout, max_tokens):
+        """Keep host state on this thread while HTTP and bounded fits overlap."""
+        from concurrent.futures import Future, TimeoutError as FutureTimeout
+        import threading
+        from .providers import ProviderError
+
+        future = Future()
+        cancellation = provider.new_cancel_token()
+        def complete():
+            if not future.set_running_or_notify_cancel():
+                return
+            try:
+                with provider.request_scope(cancellation):
+                    response = provider.complete(messages, tools, timeout=timeout, max_tokens=max_tokens)
+                future.set_result(response)
+            except BaseException as exc:
+                future.set_exception(exc)
+        thread = threading.Thread(target=complete, name='automl-llm-request', daemon=True)
+        thread.start()
+        deadline = time.monotonic() + timeout
+        exhausted = False
+        try:
+            while True:
+                try:
+                    return future.result(timeout=0.03)
+                except FutureTimeout:
+                    if future.done():
+                        raise  # A provider exception is not a pending-Future timeout.
+                    if self.budget.research_remaining() <= 2 or time.monotonic() >= deadline:
+                        raise ProviderError('LLM research window exhausted', code='cancelled', retryable=False)
+                    # Keep two slots for the response when the user set a cap.
+                    can_search = (self.config.experiment_mode == 'recipe' and not exhausted
+                                  and len(self.results) + 2 < self.config.trial_limit)
+                    if can_search:
+                        before = len(self.results)
+                        self.bounded_search(1)
+                        exhausted = len(self.results) == before
+                        if not exhausted:
+                            self.journal.append('llm_wait_search_completed', trial_ids=[r.trial_id for r in self.results[before:]])
+        finally:
+            if not future.done():
+                cancellation.cancel()
+                future.cancel()
+                thread.join(timeout=0.2)
 
     def _llm_experiment(self, hypothesis, code, decision=None):
         result = self.experiment(hypothesis, code, decision=decision)
@@ -649,7 +724,7 @@ class ResearchRun:
         proposal_schema = registry.tools["run_experiment"][1]
         registry.register("run_experiments", "Evaluate two independent hypotheses in parallel on the same holdout; return separate outcomes.",
                           {"type": "object", "properties": {"experiments": {"type": "array", "minItems": 1,
-                           "maxItems": self.config.parallel_trials, "items": proposal_schema}},
+                           "maxItems": 2, "items": proposal_schema}},
                            "required": ["experiments"], "additionalProperties": False}, self._llm_experiments, advertised=mode == "code")
         model_proposal = {"type": "object", "properties": {
             "hypothesis": {"type": "string", "minLength": 1, "maxLength": 6000},
@@ -662,7 +737,7 @@ class ResearchRun:
             "decision": DECISION_SCHEMA}, "required": ["hypothesis", "base_trial_id"], "additionalProperties": False}
         registry.register("run_model_experiments", "Test 1-2 independent parameter/preprocessing edits to measured model recipes; host preserves validated pipeline and inherited defaults.",
                           {"type": "object", "properties": {"experiments": {"type": "array", "minItems": 1,
-                           "maxItems": self.config.parallel_trials, "items": model_proposal}},
+                           "maxItems": 2, "items": model_proposal}},
                            "required": ["experiments"], "additionalProperties": False}, self._llm_model_experiments,
                           advertised=mode == "recipe")
         registry.register("finish_research", "Stop research after a successful generated candidate; host refits the best model.",
@@ -684,7 +759,8 @@ class ResearchRun:
             messages = build_messages(self.task, self.profile, self.results, best,
                                       {"n_jobs": self.config.n_jobs, "remaining_seconds": round(self.budget.research_remaining(), 2),
                                        "trial_timeout": self.config.trial_timeout, "remaining_trials": None if self.config.max_trials is None else self.config.max_trials - len(self.results),
-                                       "parallel_trials": 1 if compact and mode == "code" else self.config.parallel_trials, "reserve_plan": self.reserve_plan, "experiment_mode": mode},
+                                       "parallel_trials": self.config.parallel_trials, "proposal_batch_size": 2,
+                                       "reserve_plan": self.reserve_plan, "experiment_mode": mode},
                                       feedback=self.feedback, context_chars=self.config.context_chars, compact=compact)
             # Keep complete recent assistant/tool groups. Older attempts remain
             # available through the structured ledger and the durable journal.
@@ -706,7 +782,8 @@ class ResearchRun:
                                 messages=messages, tools=registry.schemas(), max_tokens=output_cap, input_token_bound=estimate)
             self.checkpoint()
             try:
-                response = provider.complete(messages, registry.schemas(), timeout=min(self.config.llm_timeout, self.budget.research_remaining()), max_tokens=output_cap)
+                response = self._complete_during_search(provider, messages, registry.schemas(),
+                    timeout=min(self.config.llm_timeout, max(0.1, self.budget.research_remaining() - 2)), max_tokens=output_cap)
             except ProviderError as exc:
                 # Failed requests may still be billable; reserve their estimated input.
                 charged = estimate + output_cap
@@ -717,7 +794,7 @@ class ResearchRun:
                     self.feedback = "Context overflow: the host reduced auxiliary context. Return one compact tool call."
                     self.journal.append("context_compacted", reason="provider_context_overflow")
                     continue
-                self.stop_reason = "time_budget" if self.budget.research_remaining() <= 1 else "provider_error"
+                self.stop_reason = "time_budget" if exc.code == 'cancelled' or self.budget.research_remaining() <= 2 else "provider_error"
                 break
             charged = response.total_tokens or response.prompt_tokens + response.completion_tokens or estimate + len(json.dumps(response.message).encode("utf-8"))
             self.tokens_used += charged
@@ -733,10 +810,24 @@ class ResearchRun:
         from .evaluation import publish_submission
         from .journal import atomic_write_json
         from .runtime import run_process
+        from .budgeting import can_start_final_fit
 
         write_margin = max(1.0, self.reserve_plan.get("overhead_seconds", 0.0))
         if best is None or self.budget.remaining() <= write_margin + 0.1:
             return {"status": "skipped", "reason": "No candidate or no remaining time"}
+        plan = getattr(self, 'postprocessing_plan', {})
+        if plan.get('accepted'):
+            estimate = plan.get('estimated_fit_seconds')
+            if not isinstance(estimate, (int, float)) or not math.isfinite(estimate) or estimate < 0:
+                return {"status": "skipped", "reason": "No measured final-ensemble fit window; saved checkpoint retained"}
+            required = estimate + self.reserve_plan.get('startup_guard_seconds', 0.) + write_margin
+            total = getattr(self.config, 'time_budget', math.inf)
+            self.reserve_plan = {**self.reserve_plan, 'source': 'postprocessing',
+                'estimated_fit_seconds': float(estimate),
+                'required_seconds': required, 'feasible': required <= total,
+                'reserve_seconds': min(total, max(required, self.reserve_plan.get('reserve_seconds', 0.)))}
+        if not can_start_final_fit(self.budget.remaining(), self.reserve_plan):
+            return {"status": "skipped", "reason": "Insufficient full final-fit window; saved checkpoint retained"}
         directory = self.directory / ("final_" + uuid4().hex[:8])
         directory.mkdir()
         source = Path(best.artifact_dir) / "code.py"
@@ -875,7 +966,8 @@ class ResearchRun:
                 try:
                     self.postprocessing_plan = choose_postprocessing_bounded(self.task, self.split, self.results, self.directory,
                         remaining_seconds=self.budget.remaining(), overhead_seconds=self.reserve_plan.get('overhead_seconds', 5),
-                        refit_seconds=self.reserve_plan.get('estimated_fit_seconds') or 0.,memory_limit_mb=self.config.memory_limit_mb)
+                        refit_seconds=self.reserve_plan.get('estimated_fit_seconds') or 0.,
+                        startup_guard_seconds=self.reserve_plan.get('startup_guard_seconds', 0.),memory_limit_mb=self.config.memory_limit_mb)
                     if self.postprocessing_plan.get('accepted'):
                         from .evaluation import publish_submission
                         publish_submission(self.task, Path(self.postprocessing_plan['prediction_path']), self.output)

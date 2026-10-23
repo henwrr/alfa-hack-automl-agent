@@ -84,7 +84,7 @@ def next_feature_or_weight_proposal(
     ]
     if not measured:
         return None
-    maximize = metric in {'macro_f1', 'weighted_f1', 'f1', 'accuracy', 'balanced_accuracy', 'roc_auc'}
+    maximize = metric in {'r2', 'macro_f1', 'weighted_f1', 'f1', 'accuracy', 'balanced_accuracy', 'roc_auc'}
     measured.sort(key=lambda result: result.metric, reverse=maximize)
 
     # Probe the donor's soft class balance only where F1 is the task objective.

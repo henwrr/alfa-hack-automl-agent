@@ -96,3 +96,25 @@ def test_ruzik_successful_llm_trials_are_read_from_nested_report(tmp_path):
     (tmp_path / 'report.json').write_text(json.dumps({
         'experiments': [{'status': 'ok'}], 'llm': {'successful_experiments': 3}}))
     assert run_stats('ruzik', tmp_path, tmp_path / 'missing.jsonl')['successful_llm_trials'] == 3
+
+
+def test_explicit_source_pin_is_used_for_before_after_comparison(tmp_path,monkeypatch):
+    import subprocess
+    from scripts import compare_agents
+    repo=tmp_path/'repo';repo.mkdir()
+    (repo/'solution.py').write_text('print("default runtime")\n')
+    (repo/'pkg').mkdir();(repo/'pkg/__init__.py').write_text('')
+    subprocess.run(['git','init','-q'],cwd=repo,check=True)
+    def commit(message):
+        subprocess.run(['git','add','solution.py','pkg/__init__.py'],cwd=repo,check=True)
+        subprocess.run(['git','-c','user.name=Benchmark Test','-c','user.email=benchmark@example.invalid','commit','-qm',message],cwd=repo,check=True)
+        return subprocess.check_output(['git','rev-parse','HEAD'],cwd=repo,text=True).strip()
+    default=commit('default')
+    (repo/'solution.py').write_text('print("explicit frozen runtime")\n')
+    revision=commit('explicit override')
+    monkeypatch.setattr(compare_agents,'PINS',{'tiny':(default,'','pkg')})
+    import inspect
+    override={'pins':{'tiny':(revision,'','pkg')}} if 'pins' in inspect.signature(compare_agents.stage_sources).parameters else {}
+    result=compare_agents.stage_sources(repo,tmp_path/'staged',['tiny'],**override)[0]
+    assert result['revision']==revision,'explicit comparison revision must override the default pin'
+    assert (Path(result['root'])/'solution.py').read_text()=='print("explicit frozen runtime")\n'

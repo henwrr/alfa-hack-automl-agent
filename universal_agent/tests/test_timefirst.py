@@ -36,4 +36,4 @@ def test_reserve_covers_three_candidates_even_from_same_family():
                       for i in range(1,4)]
     research._update_reserve(record=False)
     assert research.reserve_plan['potential_ensemble_fit_seconds']==450
-    assert research.budget.reserve_seconds==558
+    assert research.budget.reserve_seconds==518  # 450 fit + 8 startup + 60 bounded write overhead

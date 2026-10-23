@@ -238,7 +238,9 @@ def build_model(context):
     research.task = task
     research.config = SimpleNamespace(n_jobs=1, memory_limit_mb=2000)
     research.budget = SimpleNamespace(remaining=lambda: 45.)
-    research.reserve_plan = {"overhead_seconds": 1.}
+    from automl_agent.budgeting import plan_finalization
+    result.seconds = 1.  # A successful measured trial supplies a complete admission plan.
+    research.reserve_plan = plan_finalization(total_seconds=60., validation_fraction=.2, best=result)
     research.postprocessing_plan = plan
     research.results = [result]
     research.split = {"full_train_features": str(full_features),
