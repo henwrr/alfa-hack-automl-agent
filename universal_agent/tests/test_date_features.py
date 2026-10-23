@@ -61,6 +61,7 @@ def test_date_parts_transform_maps_missing_ambiguous_and_out_of_range_to_nan_wit
         ([None, None], "at least one non-null"),
         ([20200101, 20200102], "numeric"),
         (["2024-01-01"] * 19 + ["01/02/2024"], "95%"),
+        (["2024"] * 20, "95%"),
     ],
 )
 def test_date_parts_rejects_unusable_fit_column(values, message):
@@ -84,6 +85,33 @@ def test_date_parts_schema_is_bounded_and_operation_is_catalogued():
             [{"op": "date_parts", "cols": columns[:32]},
              {"op": "date_parts", "cols": columns[32:]}],
         )
+
+
+def test_date_parts_handles_timestamp_integer_boundaries_and_pre_epoch_days():
+    frame = pd.DataFrame(
+        {
+            "when": [
+                "1677-09-21T00:12:43.145224193Z",  # pandas Timestamp.min
+                "1969-12-31T23:59:59.999999999Z",  # one nanosecond before epoch
+                "2262-04-11T23:47:16.854775807Z",  # pandas Timestamp.max
+            ]
+        }
+    )
+
+    result = FeatureTransformer([{"op": "date_parts", "cols": ["when"]}]).fit_transform(frame)
+
+    assert result["__ua_0_when_epoch_days"].tolist() == [-106752.0, -1.0, 106751.0]
+    assert result["__ua_0_when_month"].tolist() == [9.0, 12.0, 4.0]
+
+
+def test_date_parts_accepts_compact_iso_calendar_day_but_rejects_partial_date():
+    compact = pd.DataFrame({"when": ["20240101", "20240229"]})
+    result = FeatureTransformer([{"op": "date_parts", "cols": ["when"]}]).fit_transform(compact)
+    assert result["__ua_0_when_epoch_days"].tolist() == [19723.0, 19782.0]
+
+    partial = pd.DataFrame({"when": ["2024-01"] * 20})
+    with pytest.raises(ValueError, match="95%"):
+        FeatureTransformer([{"op": "date_parts", "cols": ["when"]}]).fit(partial)
 
 
 def test_generated_recipe_with_date_parts_is_standalone_and_joblib_reloadable(tmp_path):

@@ -149,8 +149,15 @@ def _numeric_feature(frame, column):
 
 def _parse_iso_dates(values):
     # Explicit ISO8601 parsing avoids pandas' batch-dependent format inference.
-    # UTC normalization makes timezone-aware and naive inputs comparable.
-    return pd.to_datetime(values, format='ISO8601', utc=True, errors='coerce')
+    # UTC normalization makes timezone-aware and naive inputs comparable. A
+    # calendar day is required: ISO partial dates such as "2024" and "2024-01"
+    # are rejected rather than silently assigned an invented day. Basic
+    # YYYYMMDD and extended YYYY-MM-DD forms, optionally followed by a time,
+    # are accepted; pandas still validates the actual calendar/time values.
+    parsed = pd.to_datetime(values, format='ISO8601', utc=True, errors='coerce')
+    text = values.astype('string')
+    has_day = text.str.match(r'^(?:\d{4}-\d{2}-\d{2}|\d{8})(?:[Tt ].*)?$', na=False)
+    return parsed.where(has_day)
 
 
 def _feature_keys(frame, columns):
@@ -230,8 +237,17 @@ class FeatureTransformer(TransformerMixin, BaseEstimator):
                         if valid / nonnull <= 0.95:
                             raise ValueError('date_parts requires more than 95% parseable non-null ISO8601 fit dates in column ' + str(c))
                     prefix = '__ua_' + str(i) + '_' + c + '_'
-                    day_ns = 86_400_000_000_000
-                    epoch_days = parsed.dt.floor('D').astype('int64') // day_ns
+                    # Use the parsed array's own integer unit. Flooring the
+                    # Timestamp itself can overflow at pandas' minimum valid
+                    # nanosecond timestamp; integer floor division is safe and
+                    # also handles dates before the Unix epoch correctly.
+                    units_per_day = {
+                        's': 86_400,
+                        'ms': 86_400_000,
+                        'us': 86_400_000_000,
+                        'ns': 86_400_000_000_000,
+                    }[parsed.dtype.unit]
+                    epoch_days = parsed.astype('int64') // units_per_day
                     epoch_days = epoch_days.astype(float).mask(parsed.isna())
                     frame[prefix + 'epoch_days'] = epoch_days
                     frame[prefix + 'month'] = parsed.dt.month.astype(float)
