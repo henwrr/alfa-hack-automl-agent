@@ -11,7 +11,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from sklearn.datasets import make_classification, make_regression
-from sklearn.metrics import accuracy_score, f1_score, mean_squared_error
+from sklearn.metrics import accuracy_score, f1_score, mean_squared_error, mean_absolute_error, precision_recall_fscore_support
 from sklearn.model_selection import StratifiedGroupKFold, train_test_split
 
 
@@ -101,8 +101,9 @@ def _dictionary_for_frame(
         if name in indexed:
             idx = indexed[name]
             dictionary.loc[idx, "role"] = role
-            dictionary.loc[idx, "dtype"] = dtype
-            dictionary.loc[idx, "description_ru"] = description
+            if name == target:
+                dictionary.loc[idx, "dtype"] = dtype
+                dictionary.loc[idx, "description_ru"] = description
         else:
             row = {column: "" for column in dictionary.columns}
             row.update({"feature": name, "role": role, "dtype": dtype, "description_ru": description})
@@ -167,6 +168,9 @@ def _write_case(
         f"Строк train / Train rows: {len(train)}",
         f"Строк test / Test rows: {len(test_features)}",
         f"Столбцов признаков / Feature columns: {len(feature_columns)}",
+        "Входы: train.csv, test.csv, data_dictionary.csv, sample_submission.csv рядом с task.md.",
+        "Сохраните submission.csv рядом с task.md по схеме sample_submission.csv; порядок и значения ID сохраняются.",
+        "Используйте только предоставленный train для обучения; ID не является предиктивным признаком.",
         f"Протокол разбиения / Split protocol: {split_protocol}",
         "Файл test.csv — фиксированная внешняя контрольная выборка; её метки target отсутствуют во входном каталоге.",
         "The provided test.csv is the fixed external holdout. Its target labels are not included in this task directory.",
@@ -413,7 +417,8 @@ def score_submission(case: dict, submission: Path) -> dict:
             if not np.isfinite(y_true).all() or not np.isfinite(y_pred).all():
                 return _invalid("regression target and predictions must be finite numeric values", rows)
             score = float(np.sqrt(mean_squared_error(y_true, y_pred)))
-            metrics = {"rmse": score}
+            metrics = {"rmse": score, "mae": float(mean_absolute_error(y_true, y_pred)),
+                       "absolute_error_quantiles": np.quantile(np.abs(y_true-y_pred), [.5, .9, .99]).tolist()}
         elif task_type == "classification":
             if not classes:
                 return _invalid("classification case must declare classes", rows)
@@ -435,6 +440,13 @@ def score_submission(case: dict, submission: Path) -> dict:
                 metrics = {"macro_f1": score}
             else:
                 return _invalid(f"unsupported classification metric: {metric}", rows)
+            precision, recall, per_f1, support = precision_recall_fscore_support(
+                y_true, y_pred, labels=classes, zero_division=0)
+            metrics.update(accuracy=float(accuracy_score(y_true, y_pred)),
+                           macro_f1=float(f1_score(y_true, y_pred, labels=classes, average="macro", zero_division=0)),
+                           weighted_f1=float(f1_score(y_true, y_pred, labels=classes, average="weighted", zero_division=0)),
+                           per_class={str(label): {"precision": float(p), "recall": float(r), "f1": float(f), "support": int(s)}
+                                      for label, p, r, f, s in zip(classes, precision, recall, per_f1, support, strict=True)})
         else:
             return _invalid(f"unsupported task type: {task_type}", rows)
         return {"valid": True, "score": score, "metrics": metrics, "error": None, "rows": rows}
