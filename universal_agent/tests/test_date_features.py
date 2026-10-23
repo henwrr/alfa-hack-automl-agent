@@ -40,19 +40,52 @@ def test_date_parts_transform_maps_missing_ambiguous_and_out_of_range_to_nan_wit
     transformer = FeatureTransformer(ops).fit(train)
     learned_state = dict(transformer.statistics_)
     probe = pd.DataFrame(
-        {"when": [None, "not-a-date", "01/02/2024", "2500-01-01", "2020-02-29"]}
+        {
+            "when": [None, "not-a-date", "01/02/2024", "2500-01-01",
+                     "2024-01-01T00:00:00+25:00", "2020-02-29"]
+        }
     )
 
     result = transformer.transform(probe)
 
     derived = result.filter(like="__ua_")
-    assert derived.iloc[:4].isna().all().all()
-    assert derived.iloc[4].tolist() == [18321.0, 2.0, 5.0]
+    assert derived.iloc[:5].isna().all().all()
+    assert derived.iloc[5].tolist() == [18321.0, 2.0, 5.0]
     assert transformer.statistics_ == learned_state
     # Results are rowwise and do not depend on what other test rows share the batch.
-    one_row = transformer.transform(probe.iloc[[4]])
-    pd.testing.assert_frame_equal(derived.iloc[[4]].reset_index(drop=True),
+    one_row = transformer.transform(probe.iloc[[5]])
+    pd.testing.assert_frame_equal(derived.iloc[[5]].reset_index(drop=True),
                                   one_row.filter(like="__ua_").reset_index(drop=True))
+
+
+def test_date_parts_never_parses_numeric_transform_values_as_epoch_or_compact_text():
+    transformer = FeatureTransformer([{"op": "date_parts", "cols": ["when"]}]).fit(
+        pd.DataFrame({"when": ["2024-01-01", "2024-01-02"]})
+    )
+    probe = pd.DataFrame({"when": pd.Series([20240101, "20240101", "2024-01-01"], dtype=object)})
+
+    result = transformer.transform(probe)
+
+    assert result.loc[0, "__ua_0_when_epoch_days"] != result.loc[0, "__ua_0_when_epoch_days"]
+    assert result["__ua_0_when_epoch_days"].iloc[1:].tolist() == [19723.0, 19723.0]
+
+
+def test_date_parts_normalizes_datetime64_units_and_maps_nat_out_of_range_to_nan():
+    transformer = FeatureTransformer([{"op": "date_parts", "cols": ["when"]}]).fit(
+        pd.DataFrame({"when": ["2024-01-01", "2024-01-02"]})
+    )
+    probe = pd.DataFrame(
+        {
+            "when": np.array(
+                ["2024-01-01", "1969-12-31", "2500-01-01", "NaT"], dtype="datetime64[s]"
+            )
+        }
+    )
+
+    result = transformer.transform(probe)
+
+    assert result["__ua_0_when_epoch_days"].iloc[:2].tolist() == [19723.0, -1.0]
+    assert result.filter(like="__ua_").iloc[2:].isna().all().all()
 
 
 @pytest.mark.parametrize(

@@ -154,8 +154,15 @@ def _parse_iso_dates(values):
     # are rejected rather than silently assigned an invented day. Basic
     # YYYYMMDD and extended YYYY-MM-DD forms, optionally followed by a time,
     # are accepted; pandas still validates the actual calendar/time values.
-    parsed = pd.to_datetime(values, format='ISO8601', utc=True, errors='coerce')
-    text = values.astype('string')
+    # Parse text rather than raw numeric scalars: pandas otherwise interprets
+    # integers as epoch units (for example, 20240101 becomes nanoseconds after
+    # the epoch). Native datetime64 columns are first rendered as text too, so
+    # their storage unit cannot change the parsed epoch-unit arithmetic.
+    if pd.api.types.is_datetime64_any_dtype(values.dtype):
+        text = values.astype('string')
+    else:
+        text = values.map(lambda value: value if isinstance(value, str) else pd.NA).astype('string')
+    parsed = pd.to_datetime(text, format='ISO8601', utc=True, errors='coerce')
     has_day = text.str.match(r'^(?:\d{4}-\d{2}-\d{2}|\d{8})(?:[Tt ].*)?$', na=False)
     return parsed.where(has_day)
 
