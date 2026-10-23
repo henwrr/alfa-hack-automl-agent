@@ -26,6 +26,7 @@ FEATURE_OPERATIONS = {
     'combine': {'cols': ['category1', 'category2']},
     'bin': {'cols': ['number'], 'q': 10},
     'text_stats': {'cols': ['text'], 'top_k': 16},
+    'date_parts': {'cols': ['date']},
 }
 
 
@@ -106,6 +107,9 @@ def _feature_outputs(op, index):
     if kind == 'text_stats':
         return [prefix + c + '_' + suffix for c in op['cols']
                 for suffix in ['chars', 'words'] + ['token_'+str(j) for j in range(op['top_k'])]]
+    if kind == 'date_parts':
+        return [prefix + col + '_' + suffix for col in op['cols']
+                for suffix in ['epoch_days', 'month', 'weekday']]
     suffix = {'freq_encode': 'freq', 'missing_flags': 'missing', 'log1p': 'log1p', 'bin': 'bin'}[kind]
     return [prefix + col + '_' + suffix for col in op['cols']]
 
@@ -141,6 +145,12 @@ def _numeric_feature(frame, column):
     if (raw.notna() & numeric.isna()).any():
         raise ValueError('Feature operation requires numeric values in column '+str(column))
     return numeric.replace([np.inf, -np.inf], np.nan)
+
+
+def _parse_iso_dates(values):
+    # Explicit ISO8601 parsing avoids pandas' batch-dependent format inference.
+    # UTC normalization makes timezone-aware and naive inputs comparable.
+    return pd.to_datetime(values, format='ISO8601', utc=True, errors='coerce')
 
 
 def _feature_keys(frame, columns):
@@ -206,6 +216,26 @@ class FeatureTransformer(TransformerMixin, BaseEstimator):
                         values = _numeric_feature(frame, c)
                         self.statistics_[name] = values.groupby(keys, sort=False).agg(stat).to_dict()
                     frame[name] = keys.map(self.statistics_[name])
+            elif kind == 'date_parts':
+                for c in op['cols']:
+                    raw = frame[c]
+                    if fitting and pd.api.types.is_numeric_dtype(raw.dtype):
+                        raise ValueError('date_parts requires a non-numeric ISO8601 date column: ' + str(c))
+                    parsed = _parse_iso_dates(raw)
+                    if fitting:
+                        nonnull = int(raw.notna().sum())
+                        valid = int((raw.notna() & parsed.notna()).sum())
+                        if nonnull == 0:
+                            raise ValueError('date_parts requires at least one non-null fit date in column ' + str(c))
+                        if valid / nonnull <= 0.95:
+                            raise ValueError('date_parts requires more than 95% parseable non-null ISO8601 fit dates in column ' + str(c))
+                    prefix = '__ua_' + str(i) + '_' + c + '_'
+                    day_ns = 86_400_000_000_000
+                    epoch_days = parsed.dt.floor('D').astype('int64') // day_ns
+                    epoch_days = epoch_days.astype(float).mask(parsed.isna())
+                    frame[prefix + 'epoch_days'] = epoch_days
+                    frame[prefix + 'month'] = parsed.dt.month.astype(float)
+                    frame[prefix + 'weekday'] = parsed.dt.weekday.astype(float)
             elif kind == 'text_stats':
                 for c in op['cols']:
                     prefix = '__ua_' + str(i) + '_' + c + '_'
