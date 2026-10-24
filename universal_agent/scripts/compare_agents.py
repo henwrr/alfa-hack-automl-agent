@@ -25,7 +25,7 @@ import psutil
 
 
 PINS = {
-    "universal": ("91ad0a2078be0613562bd7642cab33936ff6ad64", "universal_agent", "automl_agent"),
+    "universal": ("8188bfc3d769321d5ee850da2f1021ac1261e6e9", "universal_agent", "automl_agent"),
     "aprelskiy": ("6887598613e97c03e54f3967661a8607a9a7c417", "", "automl_agent"),
     "oleg": ("05f5c78d464d5c637020db896789a2b81c893d7b", "", "agent"),
     "rakovskiy": ("ba0f29de1e4ab5586aed21e4d2348b5b4f718181", "", "agent"),
