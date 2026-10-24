@@ -147,3 +147,43 @@ def test_affordable_ensemble_replaces_an_infeasible_single_plan(tmp_path,monkeyp
     assert len(calls)==1,'feasibility must be recomputed for the actual accepted final members'
     assert research.reserve_plan['feasible'] is True
     assert research.reserve_plan['required_seconds']==18.
+
+
+@pytest.mark.parametrize('has_candidate',[True,False])
+def test_prompt_context_failure_still_reaches_fallback_and_finalization(tmp_path,monkeypatch,has_candidate):
+    research=host(tmp_path)
+    if not has_candidate:
+        research.results=[]
+    monkeypatch.setattr(research,'_family_comparison',lambda strategy:None)
+    def too_large(*args,**kwargs):
+        raise ValueError('Recipe prompt essentials require 9150 characters, above the 9000-character budget.')
+    monkeypatch.setattr('automl_agent.prompts.build_messages',too_large)
+    order=[]
+    monkeypatch.setattr(research,'bounded_search',lambda limit:order.append(('fallback',limit)))
+    def finalize(best):
+        order.append(('finalize',best.trial_id if best else None))
+        if best is None:
+            return {'status':'skipped','reason':'No measured candidate'}
+        pd.DataFrame({'id':[100,101],'y':[4.,6.]}).to_csv(research.output,index=False)
+        return {'status':'ok'}
+    monkeypatch.setattr(research,'finalize',finalize)
+    report=research.execute()
+    assert report['stop_reason']=='prompt_context_error'
+    assert report['validation']['valid']
+    assert report['llm_calls']==0 and report['total_tokens']==0
+    assert order==[('fallback',4),('finalize','trial_0001' if has_candidate else None)]
+    assert report['final_fit']['status']==('ok' if has_candidate else 'skipped')
+    events=research.journal.read_events()
+    assert len([e for e in events if e['event']=='llm_context_error'])==1
+    assert not any(e['event'] in {'llm_request','run_error'} for e in events)
+
+
+def test_prompt_keyboard_interrupt_is_not_swallowed_as_a_context_error(tmp_path,monkeypatch):
+    research=host(tmp_path)
+    monkeypatch.setattr(research,'_family_comparison',lambda strategy:None)
+    def interrupted(*args,**kwargs):
+        raise KeyboardInterrupt
+    monkeypatch.setattr('automl_agent.prompts.build_messages',interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        research.execute()
+    assert not any(e['event']=='llm_context_error' for e in research.journal.read_events())

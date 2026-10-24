@@ -756,12 +756,19 @@ class ResearchRun:
             if compact and mode == "code":
                 registry.hidden.add("run_experiments")  # avoid duplicating the full source-code schema under a tight token budget
             best = select_best(self.results, self.task.maximize)
-            messages = build_messages(self.task, self.profile, self.results, best,
-                                      {"n_jobs": self.config.n_jobs, "remaining_seconds": round(self.budget.research_remaining(), 2),
-                                       "trial_timeout": self.config.trial_timeout, "remaining_trials": None if self.config.max_trials is None else self.config.max_trials - len(self.results),
-                                       "parallel_trials": self.config.parallel_trials, "proposal_batch_size": 2,
-                                       "reserve_plan": self.reserve_plan, "experiment_mode": mode},
-                                      feedback=self.feedback, context_chars=self.config.context_chars, compact=compact)
+            try:
+                messages = build_messages(self.task, self.profile, self.results, best,
+                                          {"n_jobs": self.config.n_jobs, "remaining_seconds": round(self.budget.research_remaining(), 2),
+                                           "trial_timeout": self.config.trial_timeout, "remaining_trials": None if self.config.max_trials is None else self.config.max_trials - len(self.results),
+                                           "parallel_trials": self.config.parallel_trials, "proposal_batch_size": 2,
+                                           "reserve_plan": self.reserve_plan, "experiment_mode": mode},
+                                          feedback=self.feedback, context_chars=self.config.context_chars, compact=compact)
+            except ValueError as exc:
+                # Formatting is host preparation, not a sent or billable call.
+                # Keep the measured winner eligible for local search and refit.
+                self.stop_reason = 'prompt_context_error'
+                self.journal.append('llm_context_error', code=self.stop_reason, error=str(exc))
+                break
             # Keep complete recent assistant/tool groups. Older attempts remain
             # available through the structured ledger and the durable journal.
             for step_messages in self.recent_steps[-(1 if compact or mode == 'recipe' else 2):]:
@@ -956,7 +963,7 @@ class ResearchRun:
             if not self.config.offline and not self.config.finalize_only:
                 self.research()
             no_llm_candidate = not any(r.status == 'ok' and r.origin == 'llm' and not r.is_baseline for r in self.results)
-            fallback_search = self.stop_reason == 'provider_error' or (not self.config.offline and self.steps > 0 and no_llm_candidate)
+            fallback_search = self.stop_reason in {'provider_error', 'prompt_context_error'} or (not self.config.offline and self.steps > 0 and no_llm_candidate)
             if not self.config.finalize_only and (self.config.search_trials or fallback_search):
                 self.bounded_search(self.config.search_trials or 4)
             best = select_best(self.results, self.task.maximize)
