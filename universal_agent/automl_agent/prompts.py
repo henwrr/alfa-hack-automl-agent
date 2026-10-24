@@ -358,8 +358,10 @@ def _build_recipe_messages(task, profile, results, best, runtime_context, feedba
                            for result in results if isinstance(result.diagnostics, dict)]
         compact_target = 12000 if max(diagnostic_rows, default=0) > 20 else 9000
         limit = max(5000, min(compact_target, context_chars // 2))
+        hard_limit = max(5000, min(12000, context_chars // 2))
     else:
         limit = max(12000, context_chars)
+        hard_limit = limit
     latest = results[-1] if results else None
     ledger_results = list(results[-12:])
     if best is not None and not any(result.trial_id == best.trial_id for result in ledger_results):
@@ -544,12 +546,12 @@ def _build_recipe_messages(task, profile, results, best, runtime_context, feedba
                 if key in core["latest_experiment"]
             }
             encoded = encode_core()
-        if len(encoded) > limit:
-            # Pathological profile/class-count/recipe payloads must fail explicitly;
-            # never send a truncated recipe or malformed/empty model catalog.
-            raise ValueError(
-                f"Recipe prompt essentials require {len(encoded)} characters, above the {limit}-character budget."
-            )
+    if len(encoded) > hard_limit:
+        # Pathological profile/class-count/recipe payloads must fail explicitly;
+        # never send a truncated recipe or malformed/empty model catalog.
+        raise ValueError(
+            f"Recipe prompt essentials require {len(encoded)} characters, above the {hard_limit}-character budget."
+        )
 
     system_prompt = RECIPE_SYSTEM_PROMPT
     active_families={row['family'] for row in catalog.get('measured_bases',[])}
