@@ -4,7 +4,8 @@
 {
   "family": "lightgbm" | "catboost" | "xgboost" | "extratrees" | "linear",
   "params": {...},                 # гиперпараметры семейства (поверх разумных дефолтов)
-  "target_transform": "none" | "log1p" | "sqrt",   # только регрессия
+  "target_transform": "none" | "log1p" | "sqrt" | "gamma",   # только регрессия
+  "offset": "none" | "lag",   # регрессия: учить поправку к прошлому значению сущности (lag_*/te_*)
   "class_weight": "none" | "balanced" | "sqrt_balanced",  # только классификация
   "features": [ ...операции из features.OPS_DOC... ]
 }
@@ -97,26 +98,58 @@ class Model:
         self.model = None
         self.importance: dict[str, float] = {}
         self.patience = int(spec.get("early_stopping_rounds") or EARLY_STOPPING)
+        regression = task.task_type == "regression"
+        self.transform = spec.get("target_transform", "none") if regression else "none"
+        self.offset = spec.get("offset", "none") if regression else "none"
+        if self.transform == "gamma" and self.family != "lightgbm":
+            raise ValueError("target_transform=gamma поддерживается только для family=lightgbm")
+        self._init = None
 
     # --- таргет ---
-    def _y_forward(self, y):
+    def _base(self, X: pd.DataFrame):
+        """offset=lag: прошлое значение сущности (lag_*), если его нет — среднее сущности (te_*), иначе медиана train."""
+        if self.offset != "lag":
+            return None
+        lag = [c for c in X.columns if c.startswith("lag_") and not c.endswith("__gap")]
+        te = [c for c in X.columns if c.startswith("te_") and not c.endswith("__count")]
+        base = pd.Series(np.nan, index=X.index, dtype=float)
+        for c in lag[:1] + te[:1]:
+            base = base.fillna(pd.to_numeric(X[c], errors="coerce"))
+        base = base.fillna(self._fallback).to_numpy(float)
+        if self.transform in {"log1p", "sqrt", "gamma"}:
+            base = np.clip(base, self._floor, None)
+        return base
+
+    def _fwd(self, v):
+        if self.transform == "log1p":
+            return np.log1p(v)
+        if self.transform == "sqrt":
+            return np.sqrt(v)
+        return v
+
+    def _y_forward(self, y, base=None):
         if self.task.task_type == "classification":
             index = {str(c): i for i, c in enumerate(self.task.classes)}
             return np.array([index[str(v)] for v in np.asarray(y)], dtype=int)
         y = np.asarray(y, float)
-        mode = self.spec.get("target_transform", "none")
-        if mode == "log1p":
-            if (y <= -1).any():
-                raise ValueError("log1p: таргет содержит значения <= -1")
-            return np.log1p(y)
-        if mode == "sqrt":
-            if (y < 0).any():
-                raise ValueError("sqrt: таргет содержит отрицательные значения")
-            return np.sqrt(y)
-        return y
+        mode = self.transform
+        if mode == "log1p" and (y <= -1).any():
+            raise ValueError("log1p: таргет содержит значения <= -1")
+        if mode == "sqrt" and (y < 0).any():
+            raise ValueError("sqrt: таргет содержит отрицательные значения")
+        if mode == "gamma":
+            if (y <= 0).any():
+                raise ValueError("gamma: таргет должен быть строго > 0")
+            # gamma учится на исходной шкале; offset передаётся как init_score = log(base)
+            self._init = np.log(base) if base is not None else None
+            return y
+        z = self._fwd(y)
+        return z - self._fwd(base) if base is not None else z
 
-    def _y_inverse(self, p):
-        mode = self.spec.get("target_transform", "none")
+    def _y_inverse(self, p, base=None):
+        mode = self.transform
+        if base is not None:
+            p = p + self._fwd(base)
         if mode == "log1p":
             return np.expm1(p)
         if mode == "sqrt":
@@ -137,7 +170,14 @@ class Model:
         budget = TimeBudget(seconds)
         self.cats = [c for c in cats if c in X.columns]
         self.columns = list(X.columns)
-        y_enc = self._y_forward(y)
+        base = None
+        if self.task.task_type == "regression":
+            y_num = np.asarray(y, float)
+            self._fallback = float(np.median(y_num))
+            positive = y_num[y_num > 0]
+            self._floor = float(np.quantile(positive, 0.001)) if len(positive) else 1e-6
+            base = self._base(X)
+        y_enc = self._y_forward(y, base)
         Xp = _prepare(X, self.cats, self.family)
         self._extra_template = [_prepare(e, self.cats, self.family) for e in X_extra]
         if self.family != "catboost":
@@ -166,6 +206,9 @@ class Model:
             params.setdefault("objective", "multiclass" if self.n_classes > 2 else "binary")
             est = lgb.LGBMClassifier(**params)
         else:
+            if self.transform == "gamma":
+                params["objective"] = "gamma"
+                params["metric"] = "l2"  # early stopping по квадратичной ошибке — как у метрики задачи
             est = lgb.LGBMRegressor(**params)
 
         def stop_on_time(env):
@@ -174,9 +217,13 @@ class Model:
 
         callbacks = [stop_on_time]
         fit_kw = {"sample_weight": w_tr, "categorical_feature": [c for c in self.cats if c in X.columns] or "auto"}
+        if self._init is not None:
+            fit_kw["init_score"] = self._init[tr]
         if es is not None:
             fit_kw["eval_set"] = [(X.iloc[es], y[es])]
             fit_kw["eval_sample_weight"] = [w[es]] if w is not None else None
+            if self._init is not None:
+                fit_kw["eval_init_score"] = [self._init[es]]
             callbacks.append(lgb.early_stopping(self.patience, verbose=False))
         est.fit(X.iloc[tr], y[tr], callbacks=callbacks, **fit_kw)
         self.model = est
@@ -299,6 +346,7 @@ class Model:
     # --- предсказание ---
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         """Регрессия: значения в исходной шкале. Классификация: proba [n, k] в порядке task.classes."""
+        base = self._base(X[self.columns]) if self.task.task_type == "regression" else None
         Xp = _prepare(X[self.columns], self.cats, self.family)
         if self.family != "catboost":
             for c, cats in getattr(self, "_categories", {}).items():
@@ -315,7 +363,10 @@ class Model:
             seen = getattr(self.model, "classes_", np.arange(proba.shape[1]))
             full[:, np.asarray(seen, int)] = proba
             return full
-        return self._y_inverse(np.asarray(self.model.predict(Xp), float))
+        if self.transform == "gamma":
+            raw = np.asarray(self.model.predict(Xp, raw_score=True), float)
+            return np.exp(raw + (np.log(base) if base is not None else 0.0))
+        return self._y_inverse(np.asarray(self.model.predict(Xp), float), base)
 
 
 _VALID_PARAMS: dict[str, set[str]] = {}

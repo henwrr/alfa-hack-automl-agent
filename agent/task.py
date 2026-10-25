@@ -38,6 +38,7 @@ class Task:
         return {"target": self.target, "task_type": self.task_type, "metric": self.metric,
                 "maximize": self.maximize, "id_col": self.id_col, "output_mode": self.output_mode,
                 "classes": [str(c) for c in self.classes][:50], "n_features": len(self.feature_cols),
+                "positive_class": str(self.classes[1]) if len(self.classes) == 2 else None,
                 "categorical": self.cat_cols}
 
 
@@ -85,6 +86,30 @@ def _metric_from_text(text: str, task_type: str, n_classes: int) -> str:
     if task_type == "regression":
         return "rmse"
     return "macro_f1" if n_classes > 2 else "roc_auc"
+
+
+def _positive_class(text: str, classes: list, y: pd.Series):
+    """Бинарная задача: какой класс положительный (для F1/precision/recall и колонки вероятности).
+
+    Сортировка строк даёт ['alert', 'normal'] — положительным стал бы 'normal'. Поэтому: явное упоминание
+    в task.md, затем 1/True, иначе — редкий класс (F1 обычно считают по редкому событию).
+    """
+    lower = text.lower()
+    marker = r"(positive|положительн\w*|целев\w*\s+класс\w*|pos_label)"
+    named = []
+    for c in classes:
+        name = re.escape(str(c).lower())
+        if re.search(marker + r"[^\n]{0,60}?[`'\"«(\s=:]" + name + r"\b", lower) or \
+                re.search(r"\b" + name + r"[`'\"»)]?[^\n]{0,30}?" + marker, lower):
+            named.append(c)
+    if len(named) == 1:
+        return named[0]
+    as_str = {str(c).lower(): c for c in classes}
+    for pos in ("1", "1.0", "true", "yes", "да"):
+        if pos in as_str:
+            return as_str[pos]
+    counts = y.astype(str).value_counts()
+    return min(classes, key=lambda c: (counts.get(str(c), 0), str(c)))
 
 
 def _sample_is_probability(sample_path, target) -> bool:
@@ -218,6 +243,9 @@ def discover(task_path: Path) -> tuple[Task, pd.DataFrame, pd.DataFrame]:
         task_type = "classification" if is_int and y.nunique() <= 30 else "regression"
 
     classes = sorted(y.dropna().unique().tolist(), key=str) if task_type == "classification" else []
+    if len(classes) == 2:
+        positive = _positive_class(text, classes, y)
+        classes = [c for c in classes if c != positive] + [positive]  # положительный — classes[1]
     metric = normalize_metric(_metric_from_text(text, task_type, len(classes)))
 
     output_mode = "label"

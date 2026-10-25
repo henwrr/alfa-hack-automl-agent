@@ -38,7 +38,8 @@ class ExperimentSpec(BaseModel):
 
     family: Family = "lightgbm"
     params: dict[str, int | float | str | bool] = Field(default_factory=dict)
-    target_transform: Literal["none", "log1p", "sqrt"] = "none"
+    target_transform: Literal["none", "log1p", "sqrt", "gamma"] = "none"
+    offset: Literal["none", "lag"] = "none"
     class_weight: Literal["none", "balanced", "sqrt_balanced"] = "none"
     early_stopping_rounds: int | None = Field(None, ge=20, le=1000,
                                               description="терпение early stopping; по умолчанию 100")

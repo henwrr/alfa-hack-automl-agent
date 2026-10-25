@@ -10,7 +10,8 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-FILES = ["solution.py", *sorted(str(p.relative_to(ROOT)) for p in (ROOT / "agent").glob("*.py"))]
+# as_posix: в ZIP только «/» — архив, собранный на Windows с «\», на Linux распакуется в файлы с «\» в имени
+FILES = ["solution.py", *sorted(p.relative_to(ROOT).as_posix() for p in (ROOT / "agent").glob("*.py"))]
 
 
 def main() -> Path:

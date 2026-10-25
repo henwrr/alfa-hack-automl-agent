@@ -34,12 +34,14 @@ def normalize_spec(spec: dict, task, best_spec: dict | None) -> dict:
         removed = [json.dumps(op, sort_keys=True) for op in spec.get("remove_features") or [] if isinstance(op, dict)]
         kept = [op for op in base.get("features", []) if json.dumps(op, sort_keys=True) not in removed]
         base["features"] = kept + list(spec.get("features") or [])
-        for key in ("family", "target_transform", "class_weight", "early_stopping_rounds"):
+        for key in ("family", "target_transform", "class_weight", "early_stopping_rounds", "offset"):
             if key in spec:
                 base[key] = spec[key]
         if spec.get("family") and spec["family"] != best_spec.get("family"):
             base["params"] = dict(spec.get("params") or {})
         spec = base
+    if spec.get("target_transform") == "gamma" and spec.get("family", "lightgbm") != "lightgbm":
+        spec = {**spec, "target_transform": "log1p"}  # gamma есть только у LightGBM; ближайшая замена
     try:
         checked = ExperimentSpec.model_validate(spec)
     except ValidationError as exc:
@@ -53,6 +55,8 @@ def normalize_spec(spec: dict, task, best_spec: dict | None) -> dict:
            "features": [op.model_dump() for op in checked.features]}
     if task.task_type == "regression":
         out["target_transform"] = checked.target_transform
+        if checked.offset != "none":
+            out["offset"] = checked.offset
     else:
         out["class_weight"] = checked.class_weight
     if checked.early_stopping_rounds is not None:
@@ -76,7 +80,8 @@ SYSTEM_PROMPT = """Ты — ведущий ML-исследователь в ав
 {
   "family": "lightgbm" | "catboost" | "xgboost" | "extratrees" | "linear",
   "params": {гиперпараметры семейства; число деревьев подбирается early stopping, n_jobs/seed задаёт хост},
-  "target_transform": "none" | "log1p" | "sqrt",            (только регрессия)
+  "target_transform": "none" | "log1p" | "sqrt" | "gamma",  (только регрессия; gamma — LightGBM с objective=gamma: прогноз среднего, а не медианы, для положительного скошенного таргета; только при таргете > 0)
+  "offset": "none" | "lag",  (только регрессия) — "lag": модель учит поправку к прошлому значению той же сущности (lag_* от target_lag, если пусто — te_* от target_encode); имеет смысл только вместе с target_lag/target_encode
   "class_weight": "none" | "balanced" | "sqrt_balanced",   (только классификация)
   "early_stopping_rounds": 20..1000 — терпение early stopping (по умолчанию 100; больше — для медленного learning_rate),
   "features": [операции признаков, применяются по порядку],
@@ -238,6 +243,17 @@ class OfflineResearcher:
             if skew > 1:
                 add(f"skew таргета {skew}: log1p должен уменьшить влияние хвоста на обучение",
                     {"extends_best": True, "target_transform": "log1p"}, strong=True)
+                if prof["target"].get("min", 0) > 0 and task.metric in {"rmse", "mse", "r2"}:
+                    # log1p оценивает ближе к медиане, а RMSE минимизирует среднее: на скошенном таргете хвост
+                    # занижается. Gamma (лог-связь) оценивает среднее. Помогает не везде — решает валидация.
+                    add(f"skew таргета {skew} и метрика {task.metric}: objective=gamma прогнозирует среднее, "
+                        "а не медиану, и меньше занижает большие значения",
+                        {"extends_best": True, "family": "lightgbm", "target_transform": "gamma"}, strong=True)
+            if prof.get("entity_keys") and state.get("validation", {}).get("kind") == "time":
+                # rakovskiy_branch: на 6 панелях «сущность × период» −1…−22% RMSE на четырёх, хуже на двух —
+                # гипотеза для валидации. Ставится после выбора преобразования таргета (offset в его шкале).
+                add("прошлое значение сущности как стартовая точка: модель учит поправку к нему, а не таргет с нуля",
+                    {"extends_best": True, "offset": "lag"}, strong=True)
             add("CatBoost с нативными категориями может лучше использовать категориальные признаки",
                 {"extends_best": True, "family": "catboost"}, strong=True)
         else:
@@ -250,6 +266,15 @@ class OfflineResearcher:
             add("CatBoost с нативными категориями", {"extends_best": True, "family": "catboost"})
             if imbalance >= 3:
                 add("полные balanced-веса классов", {"extends_best": True, "class_weight": "balanced"})
+        # Дешёвая проверка: если зависимость близка к линейной, бустинги ей проигрывают
+        # (синтетика из сравнения агентов в main: Ridge 20.4 RMSE против 38.8 у нашего плейбука без linear).
+        add("линейная модель (Ridge / логистическая регрессия): проверка, не линейна ли зависимость",
+            {"extends_best": True, "family": "linear"})
+        if best.get("family") == "linear":
+            for value in (0.1, 10.0):
+                key = "alpha" if task.task_type == "regression" else "C"
+                add(f"линейная модель лидирует: регуляризация {key}={value}",
+                    {"extends_best": True, "family": "linear", "params": {key: value}})
         if missing:
             add(f"{len(missing)} признаков с пропусками >5%: явные индикаторы пропусков",
                 {"extends_best": True, "features": [{"op": "missing_flags", "cols": missing[:20]}]})

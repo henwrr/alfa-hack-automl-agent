@@ -77,6 +77,16 @@ class Agent:
         t = self.task
         self.log(f"Задача: {t.task_type}, target={t.target}, метрика={t.metric} "
                  f"({'max' if t.maximize else 'min'}), признаков={len(t.feature_cols)}, категориальных={len(t.cat_cols)}")
+        self.y = self.train[t.target].reset_index(drop=True)
+        try:  # запасной ответ до любых моделей: если все обучения упадут, файл всё равно будет
+            if t.task_type == "regression":
+                prior = np.full(len(self.test), float(pd.to_numeric(self.y, errors="coerce").mean()))
+            else:
+                share = self.y.astype(str).value_counts(normalize=True)
+                prior = np.tile([share.get(str(c), 0.0) for c in t.classes], (len(self.test), 1))
+            self.write_submission(prior, note="prior (запасной, до моделей)")
+        except Exception as exc:
+            self.log(f"Запасной submission не записан: {exc}")
         self.profile = profile(t, self.train, self.test)
         self.split = choose_split(t, self.train, self.test, seed=self.seed, n_folds=self.n_folds)
         self.log(f"Валидация: {self.split['note']}")
@@ -351,6 +361,11 @@ class Agent:
     def research(self) -> None:
         family = self.baseline_family()
         first = self.run_experiment(f"бейзлайн: {family} с дефолтами и early stopping", {"family": family}, "host")
+        for other in ("catboost", "extratrees", "linear", "xgboost"):
+            if first.get("status") == "ok" or not self._can_start_experiment():
+                break
+            if other != family:  # бейзлайн упал на этих данных — другое семейство может справиться
+                first = self.run_experiment(f"бейзлайн {family} упал: пробуем {other}", {"family": other}, "host")
         self._strong_phase(first)
         llm_failures = 0
         rounds = 0
@@ -457,6 +472,47 @@ class Agent:
                  f"выигрыш на невиденных фолдах {[round(g, 5) for g in gains]}")
         return chosen
 
+    @staticmethod
+    def _best_f1_threshold(truth_pos: np.ndarray, p: np.ndarray) -> tuple[float, float]:
+        """Точный максимум бинарной F1 по всем порогам: (порог, F1)."""
+        order = np.argsort(-p, kind="stable")
+        tp = np.cumsum(truth_pos[order])
+        ends = np.r_[np.flatnonzero(np.diff(p[order]) != 0), len(order) - 1]
+        f1 = 2 * tp[ends] / np.maximum(1, truth_pos.sum() + ends + 1)
+        k = int(np.argmax(f1))
+        nxt = p[order[ends[k] + 1]] if ends[k] + 1 < len(order) else 0.0
+        return float((p[order[ends[k]]] + nxt) / 2), float(f1[k])
+
+    def _binary_threshold(self, members: list[str]) -> float | None:
+        """Бинарная F1: порог вместо argmax (0.5), если он честно обобщается — выбор на одном фолде, проверка на других."""
+        t = self.task
+        if t.metric != "f1" or len(t.classes) != 2 or t.output_mode != "label" or len(self.split["folds"]) < 2:
+            return None
+        pos = str(t.classes[1])
+        folds = []
+        for i, (_, valid_idx) in enumerate(self.split["folds"]):
+            p = np.mean([self.fold_preds[m][i] for m in members], axis=0)[:, 1].astype(float)
+            folds.append((self.y.iloc[valid_idx].astype(str).to_numpy() == pos, p))
+
+        def f1_at(truth, p, thr):
+            pred = p >= thr
+            denom = truth.sum() + pred.sum()
+            return 2 * (truth & pred).sum() / denom if denom else 0.0
+
+        gains, chosen = [], []
+        for a, (truth_a, p_a) in enumerate(folds):
+            thr, _ = self._best_f1_threshold(truth_a, p_a)
+            chosen.append(thr)
+            for b, (truth_b, p_b) in enumerate(folds):
+                if b != a:
+                    gains.append(f1_at(truth_b, p_b, thr) - f1_at(truth_b, p_b, 0.5))
+        thr = float(np.median(chosen))
+        if np.mean(gains) <= 0:
+            self.log(f"Порог F1 не обобщается (выигрыш на невиденных фолдах {np.round(gains, 4).tolist()}) — оставляем 0.5")
+            return None
+        self.log(f"Порог F1 для класса {pos}: {thr:.4f} вместо 0.5; выигрыш на невиденных фолдах {np.round(gains, 4).tolist()}")
+        return thr
+
     def _refit(self, record: dict, seconds: float, seed: int):
         spec = record["spec"]
         feats, cats, target_ops = self._plain_features(spec)
@@ -473,7 +529,9 @@ class Agent:
         """Дообучение на всём train. Каждый член ансамбля — на нескольких seed (среднее): разброс одной модели
         от seed заметный, усреднение 3 seed дало −0.5 RMSE и +0.015 Macro F1 на обоих фолдах."""
         if not self.best:
-            raise RuntimeError("ни один эксперимент не завершился успешно")
+            self.log("Ни один эксперимент не завершился успешно — остаётся запасной prior-submission")
+            self.final_members = []
+            return
         by_id = {h["id"]: h for h in self.history}
         try:
             members = self.select_ensemble()
@@ -482,6 +540,11 @@ class Agent:
             members = [self.best["id"]]
         counts = pd.Series(members).value_counts()
         order = list(counts.index)  # самые весомые — первыми
+        try:
+            self.threshold = self._binary_threshold(list(members))
+        except Exception as exc:
+            self.log(f"Подбор порога не удался ({exc}); оставляем argmax")
+            self.threshold = None
         n_seeds = max(1, int(os.getenv("AGENT_FINAL_SEEDS", 3)))
         self.log(f"Финал: {order} {self.task.metric}={self.best['score']:.6f} (лучшая одиночная); "
                  f"дообучаем на всём train, до {n_seeds} seed на модель")
@@ -526,6 +589,8 @@ class Agent:
                 values = np.clip(np.asarray(pred, float), y.min(), y.max())
             elif t.output_mode == "proba":
                 values = np.asarray(pred)[:, 1]
+            elif getattr(self, "threshold", None) is not None:
+                values = np.asarray(t.classes, dtype=object)[(np.asarray(pred)[:, 1] >= self.threshold).astype(int)]
             else:
                 values = np.asarray(t.classes, dtype=object)[np.argmax(pred, axis=1)]
             out = pd.DataFrame({columns[0]: ids, columns[1]: values})
