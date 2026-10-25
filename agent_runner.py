@@ -17,14 +17,14 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .diagnostics import diagnose
-from .features import apply_ops, apply_target_ops, find_entity_keys, split_target_ops
-from .llm import LLM, LLMError
-from .metrics import better, score
-from .models import Model
-from .researcher import LLMResearcher, OfflineResearcher, normalize_spec
-from .task import discover, profile
-from .validation import adversarial_check, choose_split
+from agent_diagnostics import diagnose
+from agent_features import apply_ops, apply_target_ops, find_entity_keys, split_target_ops
+from agent_llm import LLM, LLMError
+from agent_metrics import better, score
+from agent_models import Model
+from agent_researcher import LLMResearcher, OfflineResearcher, normalize_spec
+from agent_task import discover, profile
+from agent_validation import adversarial_check, choose_split
 
 
 class Agent:
@@ -613,7 +613,8 @@ class Agent:
                   "ensemble_scores": getattr(self, "ensemble_scores", None),
                   "best": {k: v for k, v in (self.best or {}).items() if k != "diagnostics"},
                   "experiments": len(self.history), "elapsed_seconds": round(self.elapsed, 1),
-                  "llm": {"model": self.llm.model, "calls": self.llm.calls, "tokens": self.llm.used_tokens} if self.llm else None,
+                  "llm": {"model": self.llm.model, "calls": self.llm.calls, "tokens": self.llm.used_tokens,
+                          "cost_rub": round(self.llm.cost, 2)} if self.llm else None,
                   "submission": str(self.submission_path), "run_dir": str(self.run_dir)}
         (self.run_dir / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
         self.log(f"Готово за {self.elapsed:.0f}s: лучший {report['best'].get('id')} = {report['best'].get('score')}")

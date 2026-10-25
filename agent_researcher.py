@@ -15,10 +15,10 @@ import time
 
 import numpy as np
 
-from .features import OPS_DOC, TARGET_OPS_DOC
-from .llm import LLM, extract_json
-from .models import valid_params
-from .schemas import ExperimentSpec, Proposal, ValidationError, format_validation_error, proposal_json_schema
+from agent_features import OPS_DOC, TARGET_OPS_DOC
+from agent_llm import LLM, extract_json
+from agent_models import valid_params
+from agent_schemas import ExperimentSpec, Proposal, ValidationError, format_validation_error, proposal_json_schema
 
 def normalize_spec(spec: dict, task, best_spec: dict | None) -> dict:
     """Спецификация от LLM/плейбука -> проверенный словарь. Ошибки -> ValueError с понятным текстом.
@@ -157,7 +157,8 @@ class LLMResearcher:
                       "prompt_tokens": self.llm.last_prompt_tokens, "request": messages[-1]["content"], "response": text}
             with open(self.run_dir / "llm_calls.jsonl", "a", encoding="utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        self.log(f"LLM ответила за {time.time() - started:.0f}s (prompt ~{self.llm.last_prompt_tokens} токенов)")
+        self.log(f"LLM ответила за {time.time() - started:.0f}s (prompt ~{self.llm.last_prompt_tokens} токенов; "
+                 f"потрачено {self.llm.cost:.2f} ₽ из {self.llm.max_cost:.0f})")
         return text
 
     @staticmethod

@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import confusion_matrix, precision_recall_fscore_support
 
-from .metrics import score
+from agent_metrics import score
 
 
 def _segments_regression(frame: pd.DataFrame, residual: np.ndarray, columns: list[str], top_k: int = 4) -> list[dict]:

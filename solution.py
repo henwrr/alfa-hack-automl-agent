@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from agent.runner import Agent  # noqa: E402
+from agent_runner import Agent  # noqa: E402  — модули лежат рядом: платформа не копирует подпапки ZIP
 
 
 def main(argv=None) -> int:

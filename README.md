@@ -27,13 +27,13 @@ python solution.py path/to/task.md --offline --time-budget 300
 
 | Модуль | Что делает |
 |---|---|
-| `agent/task.py` | находит CSV, target, id, тип задачи, метрику из текста `task.md`; профиль данных |
-| `agent/validation.py` | **выбор схемы валидации**: если test целиком «в будущем» по какому-то столбцу — валидация на последних периодах; иначе (стратифицированный) holdout. **Adversarial check** train vs test |
-| `agent/models.py` | LightGBM / CatBoost / XGBoost / ExtraTrees / линейная модель; early stopping на внутреннем куске (валидация хоста в обучении не участвует), веса классов, log1p/sqrt таргета, лимит времени на эксперимент |
-| `agent/features.py` | язык признаков для LLM: `missing_flags`, `freq_encode`, `group_stats`, `ratio`, `row_stats`, `combine`, `custom` (произвольный pandas-код с AST-фильтром) и др. |
-| `agent/diagnostics.py` | **почему модель ошибается**: train vs valid, ошибка по децилям таргета, худшие сегменты (доля ошибки vs доля строк, смещение), крупнейшие ошибки, F1 по классам, топ путаниц, важность признаков |
-| `agent/researcher.py` | LLM-исследователь (JSON-спецификации экспериментов) и offline-плейбук как запасной вариант |
-| `agent/runner.py` | цикл: сильные ходы хоста → LLM (пока она думает, хост параллельно гоняет плейбук/тюнинг) → финал: честный ансамбль (отбор на одном фолде, проверка на другом) и усреднение по seed; учёт времени, safety-submission, журнал |
+| `agent_task.py` | находит CSV, target, id, тип задачи, метрику из текста `task.md`; профиль данных |
+| `agent_validation.py` | **выбор схемы валидации**: если test целиком «в будущем» по какому-то столбцу — валидация на последних периодах; иначе (стратифицированный) holdout. **Adversarial check** train vs test |
+| `agent_models.py` | LightGBM / CatBoost / XGBoost / ExtraTrees / линейная модель; early stopping на внутреннем куске (валидация хоста в обучении не участвует), веса классов, log1p/sqrt таргета, лимит времени на эксперимент |
+| `agent_features.py` | язык признаков для LLM: `missing_flags`, `freq_encode`, `group_stats`, `ratio`, `row_stats`, `combine`, `custom` (произвольный pandas-код с AST-фильтром) и др. |
+| `agent_diagnostics.py` | **почему модель ошибается**: train vs valid, ошибка по децилям таргета, худшие сегменты (доля ошибки vs доля строк, смещение), крупнейшие ошибки, F1 по классам, топ путаниц, важность признаков |
+| `agent_researcher.py` | LLM-исследователь (JSON-спецификации экспериментов) и offline-плейбук как запасной вариант |
+| `agent_runner.py` | цикл: сильные ходы хоста → LLM (пока она думает, хост параллельно гоняет плейбук/тюнинг) → финал: честный ансамбль (отбор на одном фолде, проверка на другом) и усреднение по seed; учёт времени, safety-submission, журнал |
 
 Принципы:
 - метрику считает только хост на своей валидации — LLM не может «объявить» скор;
@@ -66,7 +66,7 @@ python solution.py path/to/task.md --offline --time-budget 300
 ## Сборка для платформы
 
 ```bash
-python scripts/package.py      # -> dist/solution.zip (solution.py + agent/, ~40 КБ)
+python scripts/package.py      # -> dist/solution.zip (solution.py + requirements.txt + agent_*.py в корне, ~50 КБ)
 ```
 Архив проверен: распакован в чужую папку с пробелами/кириллицей и запущен на задаче. `Dockerfile` повторяет
 условия платформы (Python 3.12, версии из requirements.txt), но собрать его на этой машине пока не удалось —

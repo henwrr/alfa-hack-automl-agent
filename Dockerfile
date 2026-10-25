@@ -6,6 +6,5 @@ RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 && rm 
 RUN pip install --no-cache-dir numpy==1.26.4 scipy==1.12.0 pandas==2.2.3 scikit-learn==1.5.2 \
     lightgbm==4.6.0 catboost==1.2.8 xgboost==2.1.4 pydantic==2.10.6
 WORKDIR /app
-COPY solution.py ./
-COPY agent ./agent
+COPY solution.py agent_*.py ./
 ENTRYPOINT ["python", "solution.py"]

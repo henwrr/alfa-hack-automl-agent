@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .metrics import METRICS, normalize_metric
+from agent_metrics import METRICS, normalize_metric
 
 
 @dataclass

@@ -15,7 +15,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from .features import OPS_DOC, TARGET_OPS_DOC
+from agent_features import OPS_DOC, TARGET_OPS_DOC
 
 Family = Literal["lightgbm", "catboost", "xgboost", "extratrees", "linear"]
 OpName = Literal[tuple({**OPS_DOC, **TARGET_OPS_DOC})]  # type: ignore[valid-type]
