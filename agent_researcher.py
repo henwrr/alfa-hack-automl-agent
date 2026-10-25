@@ -296,15 +296,27 @@ class OfflineResearcher:
             add("LightGBM как альтернативное семейство (разнообразие для ансамбля)", {"extends_best": True, "family": "lightgbm"})
         return plan
 
+    # Диапазоны случайного поиска: (тип, от, до). Непрерывные значения — чтобы варианты не кончались
+    # (сетка из 3–5 значений исчерпывалась за ~1000 опытов на маленьких данных, и агент уходил раньше времени).
     SPACE = {
-        "lightgbm": {"num_leaves": [15, 31, 63, 127, 255], "min_child_samples": [5, 10, 20, 50, 100],
-                     "colsample_bytree": [0.4, 0.6, 0.8, 1.0], "subsample": [0.6, 0.8, 1.0],
-                     "reg_lambda": [0.0, 1.0, 5.0, 20.0], "learning_rate": [0.02, 0.03, 0.05, 0.08]},
-        "catboost": {"depth": [4, 6, 8, 10], "l2_leaf_reg": [1, 3, 10, 30], "learning_rate": [0.03, 0.05, 0.08],
-                     "random_strength": [0.5, 1, 3]},
-        "xgboost": {"max_depth": [4, 6, 8, 10], "min_child_weight": [1, 5, 20], "colsample_bytree": [0.5, 0.7, 0.9],
-                    "subsample": [0.6, 0.8, 1.0], "reg_lambda": [0.0, 1.0, 10.0], "learning_rate": [0.02, 0.04, 0.08]},
+        "lightgbm": {"num_leaves": ("int", 8, 255), "min_child_samples": ("int", 3, 150),
+                     "colsample_bytree": ("float", 0.3, 1.0), "subsample": ("float", 0.5, 1.0),
+                     "reg_lambda": ("log", 1e-3, 50.0), "learning_rate": ("log", 0.01, 0.15)},
+        "catboost": {"depth": ("int", 3, 10), "l2_leaf_reg": ("log", 0.3, 50.0), "learning_rate": ("log", 0.01, 0.15),
+                     "random_strength": ("log", 0.1, 10.0)},
+        "xgboost": {"max_depth": ("int", 3, 10), "min_child_weight": ("log", 0.5, 50.0),
+                    "colsample_bytree": ("float", 0.3, 1.0), "subsample": ("float", 0.5, 1.0),
+                    "reg_lambda": ("log", 1e-3, 50.0), "learning_rate": ("log", 0.01, 0.15)},
     }
+
+    @staticmethod
+    def _sample(rng, spec):
+        kind, lo, hi = spec
+        if kind == "int":
+            return int(rng.integers(lo, hi + 1))
+        if kind == "log":
+            return float(f"{np.exp(rng.uniform(np.log(lo), np.log(hi))):.3g}")
+        return round(float(rng.uniform(lo, hi)), 2)
 
     def _tuning_moves(self, state, n: int = 4) -> list[tuple[str, dict, bool]]:
         """Когда идеи плейбука кончились: случайный поиск вокруг лучшей модели и в других семействах.
@@ -320,7 +332,7 @@ class OfflineResearcher:
                 family = "lightgbm"
             space = self.SPACE[family]
             keys = rng.choice(list(space), size=min(3, len(space)), replace=False)
-            params = {str(k): (v.item() if hasattr(v, "item") else v) for k in keys for v in [rng.choice(space[k])]}
+            params = {str(k): self._sample(rng, space[k]) for k in keys}
             spec = {"extends_best": True, "family": family, "params": params}
             if family == best.get("family"):
                 spec["params"] = {**best.get("params", {}), **params}

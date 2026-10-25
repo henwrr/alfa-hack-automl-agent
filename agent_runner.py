@@ -87,6 +87,9 @@ class Agent:
             self.write_submission(prior, note="prior (запасной, до моделей)")
         except Exception as exc:
             self.log(f"Запасной submission не записан: {exc}")
+        cleaning = getattr(t, "cleaning", {})
+        if cleaning.get("dropped_empty") or cleaning.get("renamed"):
+            self.log(f"Колонки: удалены пустые {cleaning['dropped_empty']}, переименованы {cleaning['renamed']}")
         self.profile = profile(t, self.train, self.test)
         self.split = choose_split(t, self.train, self.test, seed=self.seed, n_folds=self.n_folds)
         self.log(f"Валидация: {self.split['note']}")
@@ -115,7 +118,9 @@ class Agent:
             self.entity_keys, self.te_candidates = [], []
             self.log(f"Поиск ключа сущности не удался: {exc}")
         self.profile["entity_keys"] = self.entity_keys
-        llm = LLM()
+        # Лимит токенов — от бюджета времени: фиксированные 400 тыс. кончились на 94-й минуте 3-часового запуска.
+        tokens = int(os.getenv("AGENT_MAX_TOKENS") or max(400_000, 250_000 * self.time_budget / 3600))
+        llm = LLM(max_total_tokens=tokens)
         if not self.offline and llm.available:
             self.researcher = LLMResearcher(llm, self.log, self.run_dir)
             self.llm = llm
@@ -200,11 +205,15 @@ class Agent:
             value = float(np.mean(fold_scores))
             previous = self.best["score"] if self.best else None
             improved = better(value, previous, self.task.maximize)
+            noise = improved and previous is not None and not self._beats_noise(fold_scores, self.best["fold_scores"])
+            if noise:
+                improved = False
             best_iteration = int(np.mean(iterations)) if iterations else None
             record.update(score=round(value, 6), fold_scores=[round(v, 6) for v in fold_scores],
                           best_iteration=best_iteration,
                           delta_vs_best=None if previous is None else round(value - previous, 6),
-                          verdict="улучшение — новая лучшая модель" if improved else "не лучше текущей лучшей")
+                          verdict="улучшение — новая лучшая модель" if improved else
+                          ("лучше в среднем, но в пределах шума фолдов — не принято" if noise else "не лучше текущей лучшей"))
             record["seconds"] = round(time.time() - started, 1)
             if improved:
                 model, X, X_test, fit_idx, valid_idx, pred = first
@@ -296,6 +305,18 @@ class Agent:
         признаков. В мультиклассе CatBoost хуже и медленнее в 34 раза (0.560 vs 0.601, 888 с vs 26 с).
         """
         return os.getenv("AGENT_BASELINE", "lightgbm")
+
+    def _beats_noise(self, new: list[float], old: list[float]) -> bool:
+        """При ≥5 фолдах улучшение принимается, только если оно больше шума: парный t по фолдам > 1.
+
+        Иначе на маленьких данных из сотен опытов «побеждает» тот, кому повезло с фолдами (проклятие победителя).
+        С 2 фолдами оценить шум нельзя — достаточно лучшего среднего.
+        """
+        if len(new) < 5 or len(new) != len(old):
+            return True
+        d = (np.asarray(new) - np.asarray(old)) * (1 if self.task.maximize else -1)
+        sd = d.std(ddof=1)
+        return d.mean() > 0 and (sd == 0 or d.mean() / (sd / np.sqrt(len(d))) > 1.0)
 
     def _playbook_move(self, reason: str) -> bool:
         proposal = self.fallback.propose(self._state(1))

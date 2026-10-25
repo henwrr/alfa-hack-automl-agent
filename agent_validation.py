@@ -7,9 +7,11 @@
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import StratifiedKFold, train_test_split
+from sklearn.model_selection import RepeatedKFold, RepeatedStratifiedKFold, StratifiedKFold, train_test_split
 
 
 def _time_like_column(train: pd.DataFrame, test: pd.DataFrame, cols: list[str]) -> tuple[str, pd.Series] | None:
@@ -78,6 +80,19 @@ def choose_split(task, train: pd.DataFrame, test: pd.DataFrame, seed: int = 42, 
             return {"kind": "time", "column": col, "folds": folds, "fit_idx": folds[0][0], "valid_idx": folds[0][1],
                     "note": (f"test целиком позже train по '{col}' (test.min > train.max) — валидация «обучение на прошлом, "
                              f"проверка на следующем периоде», {len(folds)} фолд(а) ({periods}); случайный holdout был бы слишком оптимистичен")}
+    small = os.getenv("AGENT_SMALL_DATA_CV", "1") != "0" and n < 10000
+    if small:
+        # Маленькие данные: holdout 20% — это ~100 строк, разница моделей тонет в шуме (на 455 строках
+        # валидация обещала ROC-AUC 0.9997, test дал 0.9983). Повторный k-fold проверяет каждую строку.
+        k, repeats = 5, (2 if n < 2000 else 1)
+        strat_ok = task.task_type == "classification" and y.value_counts().min() >= k
+        cls = RepeatedStratifiedKFold if strat_ok else RepeatedKFold
+        splitter = cls(n_splits=k, n_repeats=repeats, random_state=seed)
+        folds = [(np.sort(a), np.sort(b)) for a, b in splitter.split(idx, y if strat_ok else None)]
+        kind = ("stratified_" if strat_ok else "") + f"{k}fold" + (f"_x{repeats}" if repeats > 1 else "")
+        return {"kind": kind, "column": None, "folds": folds, "fit_idx": folds[0][0], "valid_idx": folds[0][1],
+                "note": f"{kind}: мало данных ({n} строк) — повторный k-fold вместо holdout; "
+                        "явного временного сдвига test относительно train не найдено"}
     stratify = None
     if task.task_type == "classification" and y.value_counts().min() >= max(2, n_folds):
         stratify = y

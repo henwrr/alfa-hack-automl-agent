@@ -138,6 +138,38 @@ def _read_dictionary(path: Path | None) -> dict:
     return out
 
 
+_BAD_NAME_CHARS = re.compile(r'[",:\[\]{}]')
+
+
+def _clean_columns(train: pd.DataFrame, test: pd.DataFrame, skip: set, dictionary: dict) -> dict:
+    """Пустые колонки — прочь, имена признаков — без символов, запрещённых LightGBM.
+
+    Kaggle-выгрузки часто содержат служебную пустую колонку вроде `Unnamed: 32`: LightGBM падает
+    на двоеточии в имени («special JSON characters»), а пользы от колонки без значений нет.
+    id и target не трогаем — их имена нужны в submission. Возвращает {старое имя: новое}.
+    """
+    empty = [c for c in train.columns if c not in skip and c in test.columns
+             and train[c].isna().all() and test[c].isna().all()]
+    train.drop(columns=empty, inplace=True)
+    test.drop(columns=empty, inplace=True)
+    renames, used = {}, set(train.columns) | set(test.columns)
+    for c in list(train.columns):
+        if c in skip or c not in test.columns or not _BAD_NAME_CHARS.search(str(c)):
+            continue
+        new = _BAD_NAME_CHARS.sub("_", str(c)).strip("_") or "col"
+        while new in used:
+            new += "_"
+        used.add(new)
+        renames[c] = new
+    if renames:
+        train.rename(columns=renames, inplace=True)
+        test.rename(columns=renames, inplace=True)
+        for old, new in renames.items():
+            if old in dictionary:
+                dictionary[new] = dictionary.pop(old)
+    return {"dropped_empty": empty, "renamed": renames}
+
+
 def _expand_dates(train: pd.DataFrame, test: pd.DataFrame, skip: set) -> list[str]:
     """Строковые даты -> числовые части. Возвращает имена исходных столбцов-дат."""
     found = []
@@ -256,6 +288,7 @@ def discover(task_path: Path) -> tuple[Task, pd.DataFrame, pd.DataFrame]:
         elif len(classes) == 2 and (metric in {"roc_auc", "log_loss"} or _sample_is_probability(sample_path, target)):
             output_mode = "proba"
 
+    cleaning = _clean_columns(train, test, skip={id_col, target}, dictionary=dictionary)
     _expand_dates(train, test, skip={id_col, target})
     _expand_text(train, test, skip={id_col, target})
     feature_cols = [c for c in test.columns if c != id_col and c in train.columns]
@@ -269,6 +302,7 @@ def discover(task_path: Path) -> tuple[Task, pd.DataFrame, pd.DataFrame]:
                 sample_path=sample_path, dictionary_path=dictionary_path, id_col=id_col, target=target,
                 task_type=task_type, metric=metric, output_mode=output_mode, classes=classes,
                 cat_cols=cat_cols, feature_cols=feature_cols, dictionary=dictionary)
+    task.cleaning = cleaning
     return task, train, test
 
 
