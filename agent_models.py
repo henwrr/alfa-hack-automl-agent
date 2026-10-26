@@ -2,7 +2,7 @@
 
 Спецификация эксперимента (её пишет LLM):
 {
-  "family": "lightgbm" | "catboost" | "xgboost" | "extratrees" | "linear",
+  "family": "lightgbm" | "catboost" | "xgboost" | "histgb" | "extratrees" | "linear",
   "params": {...},                 # гиперпараметры семейства (поверх разумных дефолтов)
   "target_transform": "none" | "log1p" | "sqrt" | "gamma",   # только регрессия
   "offset": "none" | "lag",   # регрессия: учить поправку к прошлому значению сущности (lag_*/te_*)
@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
-FAMILIES = ("lightgbm", "catboost", "xgboost", "extratrees", "linear")
+FAMILIES = ("lightgbm", "catboost", "xgboost", "histgb", "extratrees", "linear")
 
 DEFAULTS = {
     "lightgbm": {"n_estimators": 3000, "learning_rate": 0.05, "num_leaves": 63, "min_child_samples": 20,
@@ -27,6 +27,10 @@ DEFAULTS = {
     "catboost": {"iterations": 3000, "learning_rate": 0.08, "depth": 6},
     "xgboost": {"n_estimators": 3000, "learning_rate": 0.05, "max_depth": 7, "subsample": 0.8,
                 "colsample_bytree": 0.8, "min_child_weight": 1.0},
+    # sklearn HistGradientBoosting с дефолтами sklearn (lr 0.1, 31 лист) + early stopping: на Bike Sharing
+    # (отчёт Егора, 3-ч тест) именно ненастроенный HGB обогнал агента — 66.35 против 68.36 RMSE.
+    "histgb": {"max_iter": 2000, "learning_rate": 0.1, "max_leaf_nodes": 31, "min_samples_leaf": 20,
+               "l2_regularization": 0.0},
     "extratrees": {"n_estimators": 400, "min_samples_leaf": 2, "max_features": 0.7},
     "linear": {"alpha": 1.0, "C": 1.0},
 }
@@ -112,6 +116,8 @@ class Model:
             return None
         lag = [c for c in X.columns if c.startswith("lag_") and not c.endswith("__gap")]
         te = [c for c in X.columns if c.startswith("te_") and not c.endswith("__count")]
+        if not lag and not te:
+            raise ValueError("offset=lag: нет столбцов lag_*/te_* — добавьте target_lag/target_encode по ключу сущности")
         base = pd.Series(np.nan, index=X.index, dtype=float)
         for c in lag[:1] + te[:1]:
             base = base.fillna(pd.to_numeric(X[c], errors="coerce"))
@@ -286,6 +292,25 @@ class Model:
         self.best_iteration = int(est.best_iteration + 1) if es is not None else int(params["n_estimators"])
         self.importance = {k: float(v) for k, v in zip(X.columns, est.feature_importances_)}
 
+    def _fit_histgb(self, X, y, tr, es, w_tr, w, budget, n_estimators):
+        from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
+
+        Xn = self._codes(X)
+        # нативные категории HGB — только при кардинальности <= max_bins (иначе sklearn падает), остальное — коды
+        self._hgb_mask = [c in self.cats and str(X[c].dtype) == "category" and len(X[c].cat.categories) <= 250
+                          for c in X.columns]
+        params = dict(self.params, random_state=self.seed)
+        if n_estimators:
+            params.update(max_iter=int(n_estimators), early_stopping=False)
+        else:
+            params.update(early_stopping=True, validation_fraction=0.1, n_iter_no_change=max(10, self.patience // 5))
+        params["categorical_features"] = self._hgb_mask if any(self._hgb_mask) else None
+        est = (HistGradientBoostingClassifier if self.task.task_type == "classification" else HistGradientBoostingRegressor)(**params)
+        est.fit(Xn.iloc[tr].to_numpy(float), y[tr], sample_weight=w_tr)
+        self.model = est
+        self.best_iteration = int(est.n_iter_)
+        self.importance = {}  # у HGB нет встроенной важности; permutation importance — дорого
+
     def _fit_extratrees(self, X, y, tr, es, w_tr, w, budget, n_estimators):
         from sklearn.ensemble import ExtraTreesClassifier, ExtraTreesRegressor
 
@@ -353,6 +378,8 @@ class Model:
                 Xp[c] = Xp[c].cat.set_categories(cats)
         if self.family == "xgboost":
             Xp = self._codes(Xp)
+        elif self.family == "histgb":
+            Xp = self._codes(Xp).to_numpy(float)
         elif self.family == "extratrees":
             Xp = self._numeric_matrix(Xp)
         elif self.family == "linear":
@@ -403,6 +430,11 @@ def valid_params(family: str) -> set[str]:
         import xgboost as xgb
 
         names |= set(xgb.XGBRegressor().get_params()) | {"eta", "lambda", "alpha", "max_leaves", "max_bin", "gamma"}
+    elif family == "histgb":
+        from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
+
+        names |= set(inspect.signature(HistGradientBoostingRegressor.__init__).parameters)
+        names |= set(inspect.signature(HistGradientBoostingClassifier.__init__).parameters)
     elif family == "extratrees":
         from sklearn.ensemble import ExtraTreesRegressor
 

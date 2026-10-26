@@ -51,16 +51,49 @@ def normalize_spec(spec: dict, task, best_spec: dict | None) -> dict:
         hints = {k: difflib.get_close_matches(k, sorted(valid_params(checked.family)), n=2) for k in unknown}
         raise ValueError(f"неизвестные параметры для {checked.family}: "
                          + "; ".join(f"{k} (возможно {', '.join(v)})" if v else k for k, v in hints.items()))
-    out = {"family": checked.family, "params": checked.params,
-           "features": [op.model_dump() for op in checked.features]}
+    features = [op.model_dump() for op in checked.features]
+    target = getattr(task, "target", None)
+    for op in features:  # таргет как столбец признака: LLM писала target_lag cols=['cnt'] — это не ключ сущности
+        used = [c for key in ("cols", "by") for c in (op.get(key) or []) if isinstance(c, str)]
+        used += [c for pair in op.get("pairs") or [] for c in pair if isinstance(c, str)]
+        if target and target in used:
+            raise ValueError(f"{op['op']}: '{target}' — это таргет, его нет среди признаков. target_lag/target_encode "
+                             "принимают КЛЮЧ сущности (столбцы, которые повторяются в train и test, например найденный "
+                             "entity_key), а не таргет; лаги таргета хост считает сам")
+    out = {"family": checked.family, "params": _canonical_params(checked.family, checked.params, task),
+           "features": features}
     if task.task_type == "regression":
         out["target_transform"] = checked.target_transform
         if checked.offset != "none":
+            if not any(op["op"] in TARGET_OPS_DOC for op in features):
+                # без lag_*/te_* «поправка к прошлому значению» вырождается в центрирование на медиане train —
+                # так в 3-ч тесте на Bike Sharing победил exp_1247 с обещанными, но не созданными лагами
+                raise ValueError("offset=lag требует target_lag или target_encode в features (иначе это просто "
+                                 "вычитание медианы, а не поправка к прошлому значению сущности)")
             out["offset"] = checked.offset
     else:
         out["class_weight"] = checked.class_weight
-    if checked.early_stopping_rounds is not None:
+    if checked.early_stopping_rounds is not None and checked.early_stopping_rounds != 100:
         out["early_stopping_rounds"] = checked.early_stopping_rounds
+    return out
+
+
+def _canonical_params(family: str, params: dict, task) -> dict:
+    """Явный дефолт = отсутствие параметра: иначе {'l2_leaf_reg': 3} и {} — «разные» опыты с одинаковой моделью."""
+    from agent_models import DEFAULTS
+
+    defaults = dict(DEFAULTS.get(family, {}))
+    if family == "linear":  # alpha — только регрессия, C — только классификация
+        params = {k: v for k, v in params.items() if k == ("alpha" if task.task_type == "regression" else "C")}
+    implicit = {"catboost": {"l2_leaf_reg": 3, "random_strength": 1}, "lightgbm": {"min_child_weight": 1e-3},
+                "xgboost": {"reg_lambda": 1.0, "gamma": 0.0}}.get(family, {})
+    out = {}
+    for k, v in sorted(params.items()):
+        ref = defaults.get(k, implicit.get(k))
+        same = ref is not None and (ref == v or (isinstance(v, (int, float)) and isinstance(ref, (int, float))
+                                                  and not isinstance(v, bool) and float(v) == float(ref)))
+        if not same:
+            out[k] = v
     return out
 
 
@@ -72,16 +105,17 @@ SYSTEM_PROMPT = """Ты — ведущий ML-исследователь в ав
 - Сначала прочитай host_findings: это факты, которые хост уже проверил (схема валидации, ключи сущностей, сдвиг).
 - Начинай с диагностики: какие сегменты/классы дают основную ошибку, есть ли смещение (mean_residual), недопрогноз хвостов, путаница классов, переобучение (train_part_score vs valid_score), сдвиг train/test.
 - Каждая гипотеза должна опираться на конкретный факт из диагностики или профиля и менять ОДНУ понятную вещь относительно лучшей модели (признаки ИЛИ модель ИЛИ таргет ИЛИ веса). Так результат интерпретируем.
-- Не повторяй уже проверенные спецификации. Если гипотеза не подтвердилась — учти это, не долби одно направление.
+- Не повторяй уже проверенные спецификации: полный список проверенного — already_tried (семейство|таргет|операции|параметры => скор). Повтор отклоняется без обучения и тратит раунд. Если гипотеза не подтвердилась — учти это, не долби одно направление; после нескольких неудач меняй тип хода (признаки ↔ семейство ↔ таргет ↔ веса).
+- Гипотеза должна совпадать со spec: обещаешь лаги — добавь target_lag по ключу сущности; обещаешь log1p — поставь target_transform. Поле applied в истории показывает, что реально изменилось.
 - Признаки, сильно отличающиеся между train и test (adversarial check), могут вредить — проверяй их удаление.
 - Не используй id и не пытайся восстановить таргет из test.
 
 Формат спецификации эксперимента (spec):
 {
-  "family": "lightgbm" | "catboost" | "xgboost" | "extratrees" | "linear",
+  "family": "lightgbm" | "catboost" | "xgboost" | "histgb" | "extratrees" | "linear",  (histgb — sklearn HistGradientBoosting: learning_rate, max_leaf_nodes, min_samples_leaf, l2_regularization, max_depth, loss)
   "params": {гиперпараметры семейства; число деревьев подбирается early stopping, n_jobs/seed задаёт хост},
   "target_transform": "none" | "log1p" | "sqrt" | "gamma",  (только регрессия; gamma — LightGBM с objective=gamma: прогноз среднего, а не медианы, для положительного скошенного таргета; только при таргете > 0)
-  "offset": "none" | "lag",  (только регрессия) — "lag": модель учит поправку к прошлому значению той же сущности (lag_* от target_lag, если пусто — te_* от target_encode); имеет смысл только вместе с target_lag/target_encode
+  "offset": "none" | "lag",  (только регрессия) — "lag": модель учит поправку к прошлому значению той же сущности (lag_* от target_lag, если пусто — te_* от target_encode); ТРЕБУЕТ target_lag/target_encode в features, иначе отклоняется
   "class_weight": "none" | "balanced" | "sqrt_balanced",   (только классификация)
   "early_stopping_rounds": 20..1000 — терпение early stopping (по умолчанию 100; больше — для медленного learning_rate),
   "features": [операции признаков, применяются по порядку],
@@ -132,12 +166,36 @@ def _compact_history(history: list[dict], maximize: bool, best_n: int = 6, recen
     keep = {id(h) for h in top + recent}
     out = []
     for h in [h for h in history if id(h) in keep]:
-        item = {k: h.get(k) for k in ("id", "hypothesis", "status", "score", "delta_vs_best", "verdict") if h.get(k) is not None}
+        item = {k: h.get(k) for k in ("id", "hypothesis", "status", "score", "delta_vs_best", "verdict", "applied")
+                if h.get(k) is not None}
         if h.get("spec"):
             item["spec"] = h["spec"]
         if h.get("error"):
             item["error"] = h["error"][:300]
         out.append(item)
+    return out
+
+
+def _tried_summary(history: list[dict], limit: int = 60) -> list[str]:
+    """Все проверенные направления одной строкой каждое (без повторов) — чтобы LLM не предлагала их снова.
+    В 3-ч тесте 58% предложений LLM были точными повторами: она видела только лучшие и последние опыты."""
+    seen, out = set(), []
+    for h in reversed(history):
+        spec = h.get("spec")
+        if not spec:
+            continue
+        ops = ",".join(sorted({o.get("op", "?") + ("(" + ",".join(map(str, o.get("cols", [])))[:30] + ")" if o.get("cols") else "")
+                               for o in spec.get("features", [])}))
+        params = ",".join(f"{k}={v}" for k, v in sorted(spec.get("params", {}).items()))
+        line = (f"{spec.get('family')}|{spec.get('target_transform', spec.get('class_weight', ''))}"
+                f"{'|offset=' + spec['offset'] if spec.get('offset') else ''}|{ops}|{params}")
+        if line in seen:
+            continue
+        seen.add(line)
+        score = h.get("score")
+        out.append(f"{line} => {score if score is not None else (h.get('error') or 'error')[:40]}")
+        if len(out) >= limit:
+            break
     return out
 
 
@@ -169,6 +227,7 @@ class LLMResearcher:
         dump = lambda: json.dumps(payload, ensure_ascii=False, default=str, separators=(",", ":"))  # noqa: E731
         maximize = state["task"]["maximize"]
         steps = [
+            lambda: payload.update(already_tried=_tried_summary(state["history"], limit=30)),
             lambda: payload.update(history=_compact_history(state["history"], maximize, best_n=4, recent_n=6)),
             lambda: payload["best"] and payload["best"].get("diagnostics", {}).pop("largest_errors", None),
             lambda: payload.update(task_description=state["description"][:1500]),
@@ -191,7 +250,9 @@ class LLMResearcher:
             "data_profile": _compact_profile(state["profile"]), "validation": state["validation"],
             "train_test_shift": state["shift"],
             "history": _compact_history(state["history"], state["task"]["maximize"]),
-            "history_note": f"показаны лучшие и последние опыты из {len(state['history'])}",
+            "history_note": f"показаны лучшие и последние опыты из {len(state['history'])}; applied — что опыт "
+                            "РЕАЛЬНО изменил (если там nothing/0 новых столбцов — гипотеза не была проверена)",
+            "already_tried": _tried_summary(state["history"]),
             "best": copy.deepcopy(state["best"]), "budget": state["budget"],
             "previous_errors": state.get("errors", [])[-3:],
         }
@@ -232,6 +293,13 @@ class OfflineResearcher:
         def add(hypothesis, spec, strong=False):
             plan.append((hypothesis, spec, strong))
 
+        def add_linear(strong):
+            # Дешёвая проверка ДО дорогих семейств: если зависимость близка к линейной, бустинги проигрывают
+            # (синтетика из сравнения в main: Ridge 20.4 RMSE против 38.8). Стояла после CatBoost — на коротком
+            # бюджете и 10 фолдах маленьких данных до неё не доходило.
+            add("линейная модель (Ridge / логистическая регрессия): проверка, не линейна ли зависимость",
+                {"extends_best": True, "family": "linear"}, strong=strong)
+
         for key in prof.get("entity_keys", []):
             add(f"ключ сущности {key['cols']} покрывает {key['test_rows_with_known_key']:.0%} test: "
                 "средний таргет той же сущности в train (out-of-fold)",
@@ -255,22 +323,30 @@ class OfflineResearcher:
                 # гипотеза для валидации. Ставится после выбора преобразования таргета (offset в его шкале).
                 add("прошлое значение сущности как стартовая точка: модель учит поправку к нему, а не таргет с нуля",
                     {"extends_best": True, "offset": "lag"}, strong=True)
+            add_linear(strong=True)  # Ridge — доли секунды даже на сотнях тысяч строк
             add("CatBoost с нативными категориями может лучше использовать категориальные признаки",
                 {"extends_best": True, "family": "catboost"}, strong=True)
+            add("HistGradientBoosting (sklearn, дефолты + early stopping): другой алгоритм бинов и роста дерева — "
+                "на Bike Sharing ненастроенный HGB обогнал наш LightGBM",
+                {"extends_best": True, "family": "histgb"}, strong=True)
+            if prof["target"].get("min", -1) >= 0:
+                add("неотрицательный таргет (счётчик/объём): HistGradientBoosting с loss=poisson (лог-связь, среднее)",
+                    {"extends_best": True, "family": "histgb", "target_transform": "none", "offset": "none",
+                     "params": {"loss": "poisson"}})
         else:
+            add("HistGradientBoosting (sklearn): быстрый другой бустинг — проверка и разнообразие для ансамбля",
+                {"extends_best": True, "family": "histgb"})
             imbalance = prof["target"].get("imbalance_ratio", 1)
             worst = (diag.get("per_class") or [{}])[0]
             if imbalance >= 3 and task.metric in {"macro_f1", "f1", "weighted_f1"}:
                 add(f"дисбаланс классов x{imbalance}, слабейший класс {worst.get('class')} (F1={worst.get('f1')}): "
                     "мягкие веса классов поднимут recall редких классов",
                     {"extends_best": True, "class_weight": "sqrt_balanced"}, strong=True)
+            # логистическая регрессия на 87 тыс. строк UNSW — ~35 с, поэтому сильным ходом только на малых данных
+            add_linear(strong=prof.get("train_rows", 0) < 20000)
             add("CatBoost с нативными категориями", {"extends_best": True, "family": "catboost"})
             if imbalance >= 3:
                 add("полные balanced-веса классов", {"extends_best": True, "class_weight": "balanced"})
-        # Дешёвая проверка: если зависимость близка к линейной, бустинги ей проигрывают
-        # (синтетика из сравнения агентов в main: Ridge 20.4 RMSE против 38.8 у нашего плейбука без linear).
-        add("линейная модель (Ridge / логистическая регрессия): проверка, не линейна ли зависимость",
-            {"extends_best": True, "family": "linear"})
         if best.get("family") == "linear":
             for value in (0.1, 10.0):
                 key = "alpha" if task.task_type == "regression" else "C"
@@ -307,6 +383,8 @@ class OfflineResearcher:
         "xgboost": {"max_depth": ("int", 3, 10), "min_child_weight": ("log", 0.5, 50.0),
                     "colsample_bytree": ("float", 0.3, 1.0), "subsample": ("float", 0.5, 1.0),
                     "reg_lambda": ("log", 1e-3, 50.0), "learning_rate": ("log", 0.01, 0.15)},
+        "histgb": {"learning_rate": ("log", 0.02, 0.3), "max_leaf_nodes": ("int", 8, 127),
+                   "min_samples_leaf": ("int", 3, 100), "l2_regularization": ("log", 1e-3, 20.0)},
     }
 
     @staticmethod

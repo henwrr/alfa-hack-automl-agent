@@ -17,14 +17,15 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from agent_features import OPS_DOC, TARGET_OPS_DOC
 
-Family = Literal["lightgbm", "catboost", "xgboost", "extratrees", "linear"]
+Family = Literal["lightgbm", "catboost", "xgboost", "histgb", "extratrees", "linear"]
 OpName = Literal[tuple({**OPS_DOC, **TARGET_OPS_DOC})]  # type: ignore[valid-type]
 
 # Это задаёт хост: потоки, seed, логирование, число деревьев (его выбирает early stopping).
 BANNED_PARAMS = {"n_jobs", "thread_count", "nthread", "num_threads", "device", "device_type", "task_type",
                  "gpu_id", "random_state", "random_seed", "seed", "verbose", "verbosity", "callbacks",
                  "train_dir", "allow_writing_files", "early_stopping_rounds", "eval_metric", "cat_features",
-                 "n_estimators", "iterations", "num_boost_round", "num_iterations"}
+                 "n_estimators", "iterations", "num_boost_round", "num_iterations",
+                 "max_iter", "early_stopping", "n_iter_no_change", "validation_fraction", "categorical_features"}
 
 
 class FeatureOp(BaseModel):

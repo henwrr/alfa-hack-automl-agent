@@ -48,6 +48,10 @@ class Agent:
         self.errors: list[str] = []
         self.best: dict | None = None
         self.seen_specs: set[str] = set()
+        self.seen_inputs: dict[str, str] = {}  # отпечаток фактических входов -> exp_id
+        self._columns_by_spec: dict[str, list[str]] = {}
+        self._dropped_constant: list[str] = []
+        self._pending_drops: list[str] = []
         self.llm_seconds: list[float] = []
         self.fold_preds: dict[str, list] = {}  # exp_id -> предсказания на валидации каждого фолда (для ансамбля)
         self.submission_path = self.task_path.parent / "submission.csv"
@@ -142,8 +146,64 @@ class Agent:
         plain = [op for op in plain if op.get("op") != "drop"]
         feats, cats = apply_ops(self.all_X, self.task.cat_cols, plain)
         self._pending_drops = sorted({c for op in drops for c in op.get("cols", [])})
-        cats = [c for c in cats if c not in self._pending_drops]
+        # Константы (например missing_flags по столбцу без пропусков) модели ничего не дают, но делают опыт
+        # «новым» на бумаге — убираем, чтобы отпечаток входов совпал с уже проверенным.
+        keys = {c for op in target_ops for c in op.get("cols", [])}
+        self._dropped_constant = [c for c in feats.columns if c not in keys and feats[c].nunique(dropna=False) <= 1]
+        if self._dropped_constant:
+            feats = feats.drop(columns=self._dropped_constant)
+        cats = [c for c in cats if c not in self._pending_drops and c in feats.columns]
         return feats, cats, target_ops
+
+    def _fingerprint(self, spec: dict, feats: pd.DataFrame, cats: list[str], target_ops: list[dict]) -> str:
+        """Отпечаток фактических входов: содержимое столбцов (без имён) + модель/таргет/target-операции.
+        Ловит повторы с разным текстом spec: другой порядок операций, явные дефолты, no-op признаки."""
+        import hashlib
+
+        digests = sorted(
+            hashlib.md5(pd.util.hash_pandas_object(feats[c], index=False).to_numpy().tobytes()
+                        + (b"C" if c in cats else b"N")).hexdigest()
+            for c in feats.columns if c not in self._pending_drops)
+        model = {k: v for k, v in spec.items() if k != "features"}
+        payload = json.dumps({"m": model, "t": sorted(json.dumps(o, sort_keys=True) for o in target_ops), "x": digests},
+                             sort_keys=True, default=str)
+        return hashlib.md5(payload.encode()).hexdigest()
+
+    def _applied(self, spec: dict, base: dict | None, feats: pd.DataFrame) -> dict:
+        """Что эксперимент РЕАЛЬНО меняет относительно базы — уходит в историю для LLM (гипотеза ≠ код)."""
+        base = base or {}
+        out = {}
+        for k in ("family", "target_transform", "offset", "class_weight", "early_stopping_rounds"):
+            if spec.get(k) != base.get(k) and (spec.get(k), base.get(k)) not in {("none", None), (None, "none")}:
+                out[k] = f"{base.get(k)} -> {spec.get(k)}"
+        p0 = base.get("params", {}) if base.get("family") == spec["family"] else {}
+        params = {k: v for k, v in spec["params"].items() if p0.get(k) != v}
+        params.update({k: "default" for k in p0 if k not in spec["params"]})
+        if params:
+            out["params"] = params
+        f0 = {json.dumps(o, sort_keys=True) for o in base.get("features", [])}
+        f1 = {json.dumps(o, sort_keys=True) for o in spec.get("features", [])}
+        if f1 - f0:
+            out["added_ops"] = [json.loads(s)["op"] + str(json.loads(s).get("cols", ""))[:60] for s in sorted(f1 - f0)]
+        if f0 - f1:
+            out["removed_ops"] = [json.loads(s)["op"] + str(json.loads(s).get("cols", ""))[:60] for s in sorted(f0 - f1)]
+        base_cols = self._columns_by_spec.get(json.dumps(base, sort_keys=True)) if base else None
+        final = [c for c in feats.columns if c not in self._pending_drops]  # drop выполняется последним
+        if base_cols is not None:
+            new = [c for c in final if c not in base_cols]
+            gone = [c for c in base_cols if c not in final]
+            out["columns"] = f"+{len(new)} {new[:6]} / -{len(gone)} {gone[:6]}"
+        if self._dropped_constant:
+            out["dropped_constant_columns"] = self._dropped_constant[:8]
+        import re
+
+        assigned = {c for op in spec.get("features", []) if op.get("op") == "custom"
+                    for c in re.findall(r"df\[['\"]([^'\"]+)['\"]\]\s*=(?!=)", op.get("code", ""))}
+        recreated = [c for c in self._pending_drops if c in assigned]
+        if recreated:
+            out["warning"] = (f"drop выполняется ПОСЛЕ остальных операций: столбцы {recreated[:6]} удалены, даже если "
+                              "custom/другая операция создала их заново — переименуйте новые столбцы")
+        return out or {"nothing": "фактически ничего не меняется"}
 
     def _with_target_ops(self, feats, target_ops, train_rows):
         """train_rows — строки train, чьи таргеты можно использовать (fit-часть фолда / весь train в финале)."""
@@ -185,6 +245,13 @@ class Agent:
                 raise ValueError("такая спецификация уже проверялась")
             self.seen_specs.add(key)
             feats, cats, target_ops = self._plain_features(spec)
+            record["applied"] = self._applied(spec, base, feats)
+            fingerprint = self._fingerprint(spec, feats, cats, target_ops)
+            if fingerprint in self.seen_inputs:
+                raise ValueError(f"такая спецификация уже проверялась по сути: фактические входы и параметры "
+                                 f"совпадают с {self.seen_inputs[fingerprint]}")
+            self.seen_inputs[fingerprint] = exp_id
+            self._columns_by_spec[key] = [c for c in feats.columns if c not in self._pending_drops]
             folds = self.split["folds"]
             limit = max(30.0, min(self.remaining - self._refit_estimate() - 10, max(90.0, 0.35 * self.time_budget)))
             fold_scores, iterations, first, preds = [], [], None, []
@@ -244,7 +311,7 @@ class Agent:
     # ---------- исследование ----------
     def _state(self, max_experiments: int) -> dict:
         history = [{k: h.get(k) for k in ("id", "source", "hypothesis", "spec", "status", "score", "fold_scores", "delta_vs_best",
-                                          "verdict", "seconds", "best_iteration", "error")} for h in self.history]
+                                          "verdict", "seconds", "best_iteration", "error", "applied")} for h in self.history]
         best = None
         if self.best:
             best = {k: self.best[k] for k in ("id", "score", "fold_scores", "spec", "best_iteration", "diagnostics")}
@@ -606,8 +673,13 @@ class Agent:
             out = pd.DataFrame({columns[0]: ids, **{c: proba[:, by_name[str(c)]] for c in columns[1:]}})
         else:
             if t.task_type == "regression":
-                y = self.y.astype(float)
-                values = np.clip(np.asarray(pred, float), y.min(), y.max())
+                # Жёсткий клип к [min, max] train портил экстраполяцию линейной модели: одна точка test за
+                # диапазоном train дала RMSE 25.9 вместо 21.1. Деревья за диапазон и так не выходят — клип
+                # оставлен только как защита от взрыва прогноза (±50% диапазона; 0 — для неотрицательного таргета).
+                y = pd.to_numeric(self.y, errors="coerce").astype(float)
+                span = float(y.max() - y.min()) or 1.0
+                lo = 0.0 if y.min() >= 0 else y.min() - 0.5 * span
+                values = np.clip(np.asarray(pred, float), lo, y.max() + 0.5 * span)
             elif t.output_mode == "proba":
                 values = np.asarray(pred)[:, 1]
             elif getattr(self, "threshold", None) is not None:
