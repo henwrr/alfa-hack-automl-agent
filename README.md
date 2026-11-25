@@ -1,19 +1,91 @@
-# Универсальный AutoResearch агент
+# alfa_hackathon — AutoResearch-агент (ветка oleg_branch)
 
-Готовая реализация: [universal_agent](universal_agent/README.md). Агент исследует табличные задачи регрессии и классификации через локальную Ollama или выданный платформой API и сохраняет проверенный submission.csv рядом с task.md.
+Агент сам решает табличную ML-задачу по `task.md`: понимает задачу, строит честную валидацию,
+обучает сильный бейзлайн, а затем в цикле **диагностика → гипотеза → эксперимент → сравнение**
+улучшает модель и пишет `submission.csv` рядом с `task.md`.
+
+## Запуск
 
 ```bash
-uv venv --python 3.12 .venv
-uv pip install --python .venv/bin/python -r universal_agent/requirements-mvp.txt
-.venv/bin/python universal_agent/solution.py /path/to/task.md
+# с LLM (переменные как в baseline.py)
+export OPENAI_API_KEY=... OPENAI_MODEL=... OPENAI_BASE_URL=...
+python solution.py path/to/task.md
+
+# без LLM — эвристический плейбук (для разработки)
+python solution.py path/to/task.md --offline --time-budget 300
 ```
 
-Без ключа используется запущенная локально Ollama с qwen3.5:9b. Установка модели выполняется отдельно.
+Бюджет времени: `--time-budget` или `AGENT_TIME_BUDGET`, по умолчанию **600 с** (быстрый режим
+разработки; лимит платформы — 10800 с). Журнал запуска: `agent_runs/<время>/` рядом с `task.md`
+(`agent.log`, `experiments.jsonl`, `context.json`, `report.json`).
 
-- [Подробный разбор условий](universal_agent/docs/HACKATHON_REQUIREMENTS.md)
-- [Плюсы и минусы всех четырёх агентов](universal_agent/docs/AGENT_REVIEW.md)
-- [Повторный аудит обновлённого Ruzik и перенесённые идеи](universal_agent/docs/reviews/ruzik_update_85f4988.md)
-- [Какие идеи из каких файлов перенесены](universal_agent/docs/PROVENANCE.md)
-- [Результаты тестов и ограничения](universal_agent/docs/VALIDATION.md)
+Проверка LLM-цикла без ключа: `python tests/fake_llm_server.py 8765`, затем запуск с
+`OPENAI_BASE_URL=http://127.0.0.1:8765/v1 OPENAI_MODEL=fake`. Последний запрос к LLM
+сохраняется в `tests/last_llm_request.json` — там видно ровно то, что получает модель.
 
-Исходный requirements.txt организаторов сохранён. Локальные all_agents, датасеты, PDF, модели, ключи, журналы и ZIP не публикуются; SHA256 исходных файлов сохранены в [инвентаризации](universal_agent/docs/SOURCE_INVENTORY.json).
+## Как устроено
+
+| Модуль | Что делает |
+|---|---|
+| `agent_task.py` | находит CSV, target, id, тип задачи, метрику из текста `task.md`; профиль данных |
+| `agent_validation.py` | **выбор схемы валидации**: если test целиком «в будущем» по какому-то столбцу — валидация на последних периодах; иначе (стратифицированный) holdout. **Adversarial check** train vs test |
+| `agent_models.py` | LightGBM / CatBoost / XGBoost / ExtraTrees / линейная модель; early stopping на внутреннем куске (валидация хоста в обучении не участвует), веса классов, log1p/sqrt таргета, лимит времени на эксперимент |
+| `agent_features.py` | язык признаков для LLM: `missing_flags`, `freq_encode`, `group_stats`, `ratio`, `row_stats`, `combine`, `custom` (произвольный pandas-код с AST-фильтром) и др. |
+| `agent_diagnostics.py` | **почему модель ошибается**: train vs valid, ошибка по децилям таргета, худшие сегменты (доля ошибки vs доля строк, смещение), крупнейшие ошибки, F1 по классам, топ путаниц, важность признаков |
+| `agent_researcher.py` | LLM-исследователь (JSON-спецификации экспериментов) и offline-плейбук как запасной вариант |
+| `agent_runner.py` | цикл: сильные ходы хоста → LLM (пока она думает, хост параллельно гоняет плейбук/тюнинг) → финал: честный ансамбль (отбор на одном фолде, проверка на другом) и усреднение по seed; учёт времени, safety-submission, журнал |
+
+Принципы:
+- метрику считает только хост на своей валидации — LLM не может «объявить» скор;
+- LLM описывает эксперимент спецификацией, а не пишет весь пайплайн — меньше падений;
+- после каждого улучшения сразу пишется safety-`submission.csv`; финальная модель дообучается на всём train;
+- сбой LLM не останавливает агента: раунд делает offline-плейбук.
+
+Из решения в `aprelskiy_branch` перенесены сильные стороны: host-owned метрика (защита от взлома метрики),
+гарантированный submission при любых сбоях, атомарная запись, резерв времени на refit, журнал решений.
+
+## Результаты (локальная валидация, MacBook M3)
+
+| Режим | Регрессия (RMSE ↓) | Классификация (Macro F1 ↑) |
+|---|---|---|
+| aprelskiy_branch | 45.33 (случайный holdout, оптимистичнее) | 0.565 |
+| По умолчанию: 600 с, без LLM | **33.85** | **0.664** |
+| 1 час + LLM qwen3.5:4b | **33.44** | **0.670** |
+
+Регрессия — 2 временных фолда (годы 1–4 → 5, 1–3 → 4; test = год 6), классификация — stratified holdout 80/20 × 2.
+
+Что дало прирост и что не сработало — в [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md).
+
+Ключевые находки агента (делаются автоматически, для любой задачи):
+- **схема валидации**: test целиком позже train по столбцу → временные фолды;
+- **ключ сущности**: комбинация столбцов, по которой объекты повторяются в train и test
+  (здание: `floor_area+year_built+facility_type`; поток: `sbytes`) → `target_encode` / `target_lag`;
+- adversarial check сдвига train/test, даты-строки раскладываются на части, бинарные/мультиклассовые
+  вероятности в submission, если этого требует `sample_submission`.
+
+## Сборка для платформы
+
+```bash
+python scripts/package.py      # -> dist/solution.zip (solution.py + requirements.txt + agent_*.py в корне, ~50 КБ)
+```
+Архив проверен: распакован в чужую папку с пробелами/кириллицей и запущен на задаче. `Dockerfile` повторяет
+условия платформы (Python 3.12, версии из requirements.txt), но собрать его на этой машине пока не удалось —
+Docker не установлен.
+
+Полезные переменные: `AGENT_TIME_BUDGET` (по умолчанию 600 с), `AGENT_FOLDS` (2), `AGENT_FINAL_SEEDS` (3),
+`AGENT_SAVE_PREDS=1` (сохранять предсказания фолдов для анализа), `AGENT_MAX_TOKENS`, `AGENT_LLM_TIMEOUT`.
+
+## Локальная LLM (Ollama)
+
+```bash
+ollama serve &              # затем: ollama pull qwen3.5:4b
+export OPENAI_BASE_URL=http://127.0.0.1:11434 OPENAI_MODEL=qwen3.5:4b AUTOML_PROVIDER=ollama
+python solution.py path/to/task.md --time-budget 1200
+```
+Ответы LLM сохраняются в `agent_runs/<run>/llm_calls.jsonl`. qwen3.5:9b требует ~7 ГБ памяти под модель
+и не запускается на Mac с 8 ГБ RAM.
+
+## Дальше
+- подключить API организаторов (Qwen 27B) и сравнить LLM-исследователя с offline-плейбуком;
+- проверить на Python 3.12 с версиями из `requirements.txt` (собрать Dockerfile или conda-окружение);
+- выбрать бюджет времени для сабмита (`AGENT_TIME_BUDGET`, по умолчанию 600 с из 10 800 доступных).
